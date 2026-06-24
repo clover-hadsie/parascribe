@@ -1,0 +1,55 @@
+# Example systemd unit for parascribe. Copy to /etc/systemd/system/parascribe.service,
+# adjust paths/user, then: systemctl daemon-reload && systemctl enable --now parascribe
+#
+# Assumes a venv at /opt/inference/parascribe/.venv built from requirements-gpu.txt,
+# and an API key file at /etc/parascribe/api_key (chmod 600, owned by the service user).
+
+[Unit]
+Description=parascribe OpenAI-compatible Parakeet ASR server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=inference
+Group=ai
+WorkingDirectory=/opt/inference/parascribe
+
+# tmpfs work_dir, created per-start and owned by the service user (forensic temp).
+RuntimeDirectory=parascribe
+RuntimeDirectoryMode=0700
+
+Environment=PARASCRIBE_EXECUTION_PROVIDER=cuda
+Environment=PARASCRIBE_GPU_DEVICE_ID=0
+Environment=PARASCRIBE_WORK_DIR=/run/parascribe
+Environment=PARASCRIBE_HOST=127.0.0.1
+Environment=PARASCRIBE_PORT=8000
+Environment=PARASCRIBE_API_KEY_FILE=/etc/parascribe/api_key
+# Hugging Face model cache must be writable (see ReadWritePaths below).
+Environment=HF_HOME=/opt/inference/parascribe/hf-cache
+
+ExecStart=/opt/inference/parascribe/.venv/bin/python -m uvicorn parascribe.main:app \
+    --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+
+# --- Hardening ---
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/parascribe /opt/inference/parascribe/hf-cache
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+
+# --- NVIDIA GPU device access ---
+DeviceAllow=/dev/nvidia0 rw
+DeviceAllow=/dev/nvidiactl rw
+DeviceAllow=/dev/nvidia-uvm rw
+DeviceAllow=/dev/nvidia-uvm-tools rw
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+# Development + test tooling. Uses the CPU onnxruntime (M1 dev).
+# Install: .venv/bin/pip install -r requirements-dev.txt
+-r requirements-cpu.txt
+pytest==9.1.1
+pytest-asyncio==1.4.0
+httpx==0.28.1
+ruff==0.15.19
+mypy==2.1.0

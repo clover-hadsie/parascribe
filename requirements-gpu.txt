@@ -1,0 +1,5 @@
+# GPU onnxruntime for deployment. Install: pip install -r requirements-gpu.txt
+-r requirements.txt
+# CUDA-12 build verified on the target GTX 1080 Ti (Pascal sm_61). Do not float;
+# see SPEC §8.
+onnxruntime-gpu==1.24.4

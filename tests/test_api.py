@@ -1,0 +1,211 @@
+"""API route tests. The model is faked; ffmpeg decode is real (tiny fixtures)."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import subprocess
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from parascribe.asr import RawSegment
+from parascribe.config import Settings
+from parascribe.main import InferenceGate, QueueFullError, create_app
+
+_TOK = [" The", " second", " part", "."]
+_TS = [0.0, 0.4, 0.8, 1.2]
+CANNED = [
+    RawSegment(0.0, 2.0, "The first part.", [" The", " first", " part", "."], _TS, [-0.1] * 4),
+    RawSegment(4.0, 6.0, "The second part.", _TOK, _TS, None),
+]
+
+
+class FakeTranscriber:
+    device = "cpu"
+    provider_active = True
+
+    def transcribe(self, audio, *, language=None):
+        yield from CANNED
+
+
+@pytest.fixture
+def wav(tmp_path: Path) -> Path:
+    out = tmp_path / "clip.wav"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi",
+         "-i", "sine=frequency=300:duration=1:sample_rate=16000", str(out), "-y"],
+        check=True,
+    )
+    return out
+
+
+@pytest.fixture
+def video(tmp_path: Path) -> Path:
+    out = tmp_path / "clip.mp4"
+    subprocess.run(
+        ["ffmpeg", "-v", "error",
+         "-f", "lavfi", "-i", "testsrc=duration=1:size=128x96:rate=10",
+         "-f", "lavfi", "-i", "sine=frequency=300:duration=1:sample_rate=16000",
+         "-shortest", str(out), "-y"],
+        check=True,
+    )
+    return out
+
+
+def sse_events(text: str) -> list[dict]:
+    return [json.loads(line[len("data: "):]) for line in text.splitlines()
+            if line.startswith("data: ")]
+
+
+def make_client(tmp_path: Path, **overrides) -> TestClient:
+    settings = Settings(
+        execution_provider="cpu",
+        work_dir=tmp_path / "work",
+        api_key="secret",
+        **overrides,
+    )
+    return TestClient(create_app(settings=settings, transcriber=FakeTranscriber()))
+
+
+def post(client, wav, *, key="secret", **data):
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    with wav.open("rb") as fh:
+        return client.post(
+            "/v1/audio/transcriptions",
+            files={"file": ("clip.wav", fh, "audio/wav")},
+            data={"model": "parascribe", **data},
+            headers=headers,
+        )
+
+
+class TestAuth:
+    def test_missing_key_is_401(self, tmp_path, wav):
+        with make_client(tmp_path) as client:
+            assert post(client, wav, key=None).status_code == 401
+
+    def test_wrong_key_is_401(self, tmp_path, wav):
+        with make_client(tmp_path) as client:
+            assert post(client, wav, key="wrong").status_code == 401
+
+    def test_correct_key_is_200(self, tmp_path, wav):
+        with make_client(tmp_path) as client:
+            assert post(client, wav).status_code == 200
+
+
+class TestResponseFormats:
+    def test_json_default_returns_text_only(self, tmp_path, wav):
+        with make_client(tmp_path) as client:
+            r = post(client, wav)
+            assert r.json() == {"text": "The first part. The second part."}
+
+    def test_verbose_json_has_segments_without_granularities(self, tmp_path, wav):
+        # Invariant #1: segments + real times without timestamp_granularities[].
+        with make_client(tmp_path) as client:
+            r = post(client, wav, response_format="verbose_json")
+            body = r.json()
+            assert body["segments"][1]["start"] == 4.0
+            assert "words" not in body
+
+    def test_verbose_json_words_when_requested(self, tmp_path, wav):
+        with make_client(tmp_path) as client:
+            r = post(
+                client, wav,
+                response_format="verbose_json",
+                **{"timestamp_granularities[]": "word"},
+            )
+            words = r.json()["words"]
+            # second segment's words are globally offset by 4.0
+            assert any(w["word"] == "second" and w["start"] == 4.4 for w in words)
+
+    def test_srt_content_type(self, tmp_path, wav):
+        with make_client(tmp_path) as client:
+            r = post(client, wav, response_format="srt")
+            assert r.text.startswith("1\n00:00:00,000 --> 00:00:02,000")
+
+    def test_bad_format_is_400(self, tmp_path, wav):
+        with make_client(tmp_path) as client:
+            assert post(client, wav, response_format="flac").status_code == 400
+
+
+class TestErrors:
+    def test_non_media_file_is_400(self, tmp_path):
+        bogus = tmp_path / "x.bin"
+        bogus.write_bytes(b"not media" * 50)
+        with make_client(tmp_path) as client:
+            assert post(client, bogus).status_code == 400
+
+    def test_oversize_is_413(self, tmp_path, wav):
+        with make_client(tmp_path, max_upload_mb=0) as client:
+            assert post(client, wav).status_code == 413
+
+
+class TestHealth:
+    def test_health_reports_provider(self, tmp_path):
+        with make_client(tmp_path) as client:
+            body = client.get("/health").json()
+            assert body["status"] == "ok"
+            assert body["provider_active"] is True
+            assert body["device"] == "cpu"
+
+
+class TestStreaming:
+    def test_stream_json_emits_deltas_then_done(self, tmp_path, wav):
+        with make_client(tmp_path) as client:
+            r = post(client, wav, stream="true")
+            assert r.headers["content-type"].startswith("text/event-stream")
+            events = sse_events(r.text)
+            deltas = [e for e in events if e["type"] == "transcript.text.delta"]
+            done = [e for e in events if e["type"] == "transcript.text.done"]
+            assert len(deltas) == 2
+            assert len(done) == 1
+            assert done[0]["text"] == "The first part. The second part."
+
+    def test_stream_verbose_json_done_carries_segments(self, tmp_path, wav):
+        with make_client(tmp_path) as client:
+            r = post(client, wav, stream="true", response_format="verbose_json")
+            done = [e for e in sse_events(r.text) if e["type"] == "transcript.text.done"]
+            assert done[0]["segments"][1]["start"] == 4.0
+
+    def test_stream_ignored_for_srt_falls_back(self, tmp_path, wav):
+        # Decision #6: stream=true with a non-streamable format returns non-streamed.
+        with make_client(tmp_path) as client:
+            r = post(client, wav, stream="true", response_format="srt")
+            assert not r.headers["content-type"].startswith("text/event-stream")
+            assert r.text.startswith("1\n00:00:00,000 -->")
+
+
+class TestVideoGating:
+    def test_video_rejected_when_disabled(self, tmp_path, video):
+        with make_client(tmp_path) as client:  # enable_video defaults False
+            assert post(client, video).status_code == 400
+
+    def test_video_accepted_when_enabled(self, tmp_path, video):
+        with make_client(tmp_path, enable_video=True) as client:
+            assert post(client, video).status_code == 200
+
+
+class TestInferenceGate:
+    async def test_rejects_beyond_capacity(self):
+        gate = InferenceGate(capacity=1)
+        async with gate:
+            with pytest.raises(QueueFullError):
+                async with gate:
+                    pass
+
+    async def test_serializes_execution(self):
+        gate = InferenceGate(capacity=10)
+        order: list[tuple[str, int]] = []
+
+        async def worker(n: int) -> None:
+            async with gate:
+                order.append(("start", n))
+                await asyncio.sleep(0.01)
+                order.append(("end", n))
+
+        await asyncio.gather(*(worker(n) for n in range(3)))
+        # No interleaving: every start is immediately followed by its own end.
+        for i in range(0, len(order), 2):
+            assert order[i][0] == "start" and order[i + 1][0] == "end"
+            assert order[i][1] == order[i + 1][1]
