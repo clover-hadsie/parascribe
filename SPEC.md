@@ -250,6 +250,12 @@ working wheel exists.
 - **Pin `onnxruntime-gpu`** to a version verified to include sm_61 / CUDA provider
   support. Document the pinned version and the CUDA/cuDNN it expects in the README
   and `requirements.txt`. Do not float the dependency.
+- **Match the CUDA userspace wheels to the host driver.** The bundled
+  `nvidia-*-cu12` wheels ship a specific CUDA minor; the host NVIDIA driver runs an
+  equal-or-older runtime, never a newer one. A 550-series driver (CUDA 12.4
+  ceiling) fails at cuDNN init (`CUDNN_STATUS_EXECUTION_FAILED_CUDART`) against
+  12.9 wheels. Pin the wheels to the oldest deploy driver's CUDA line (12.4);
+  newer drivers run them via backward compatibility.
 - Provide `scripts/check_gpu.py` that loads the model and prints the active
   execution provider, so a deployer can confirm GPU engagement in one command.
 - The startup GPU check (invariant #2) is what catches a bad wheel in production.
