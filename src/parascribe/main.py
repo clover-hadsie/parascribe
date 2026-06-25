@@ -16,9 +16,11 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from parascribe import __version__
+from parascribe.align import apply_speakers
 from parascribe.asr import RawSegment, Transcriber
 from parascribe.auth import check_bearer
 from parascribe.config import Settings
+from parascribe.diarize import Diarizer
 from parascribe.formats import (
     ALLOWED_FORMATS,
     STREAMABLE_FORMATS,
@@ -168,8 +170,12 @@ async def _save_upload(upload: UploadFile, dest: Path, max_bytes: int) -> None:
             handle.write(chunk)
 
 
-def create_app(settings: Settings | None = None, transcriber: Transcriber | None = None) -> FastAPI:
-    """Build the app. Inject ``transcriber`` in tests to skip the real model load."""
+def create_app(
+    settings: Settings | None = None,
+    transcriber: Transcriber | None = None,
+    diarizer: Diarizer | None = None,
+) -> FastAPI:
+    """Build the app. Inject ``transcriber``/``diarizer`` in tests to skip model loads."""
     settings = settings or Settings()
 
     @asynccontextmanager
@@ -180,10 +186,16 @@ def create_app(settings: Settings | None = None, transcriber: Transcriber | None
             logger.warning("No API key configured: authentication is DISABLED.")
         app.state.settings = settings
         app.state.transcriber = transcriber or Transcriber(settings)
+        # Load the diarizer once when enabled; a load failure (missing deps/gated
+        # model) fails startup loudly rather than silently disabling the feature.
+        app.state.diarizer = diarizer or (
+            Diarizer(settings) if settings.enable_diarization else None
+        )
         app.state.gate = InferenceGate(settings.max_queue + 1)
         logger.info(
-            "ready: model=%s provider=%s max_queue=%d",
-            settings.model_id, settings.execution_provider, settings.max_queue,
+            "ready: model=%s provider=%s diarization=%s max_queue=%d",
+            settings.model_id, settings.execution_provider,
+            app.state.diarizer is not None, settings.max_queue,
         )
         yield
 
@@ -211,6 +223,8 @@ def create_app(settings: Settings | None = None, transcriber: Transcriber | None
         stream: Annotated[bool, Form()] = False,
         temperature: Annotated[float | None, Form()] = None,
         prompt: Annotated[str | None, Form()] = None,
+        diarization: Annotated[bool, Form()] = False,
+        num_speakers: Annotated[int | None, Form()] = None,
         # OpenAI sends `timestamp_granularities[]`; some clients send the bare key.
         # Accept both. LiteLLM is known to drop this entirely (invariant #1).
         timestamp_granularities_bracket: Annotated[
@@ -221,6 +235,7 @@ def create_app(settings: Settings | None = None, transcriber: Transcriber | None
     ) -> Response:
         st: Settings = request.app.state.settings
         transcriber: Transcriber = request.app.state.transcriber
+        diarizer: Diarizer | None = request.app.state.diarizer
         gate: InferenceGate = request.app.state.gate
 
         check_bearer(st.resolved_api_key(), authorization)
@@ -230,27 +245,37 @@ def create_app(settings: Settings | None = None, transcriber: Transcriber | None
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Unsupported response_format. Allowed: {list(ALLOWED_FORMATS)}",
             )
+        if diarization and diarizer is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Diarization is not enabled on this server.",
+            )
+        if num_speakers is not None and num_speakers < 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="num_speakers must be a positive integer.",
+            )
 
         granularities = set(timestamp_granularities_bracket or []) | set(
             timestamp_granularities or []
         )
         include_words = "word" in granularities
         language_hint = language or st.default_language
-        do_stream = stream and response_format in STREAMABLE_FORMATS
+        # Diarization needs the whole file (global clustering), so it can't stream.
+        do_stream = stream and response_format in STREAMABLE_FORMATS and not diarization
 
         rid = uuid.uuid4().hex[:8]
         log = {"rid": rid}
         logger.info(
-            "recv: format=%s stream=%s lang=%s words=%s",
-            response_format, do_stream, language_hint or "-", include_words, extra=log,
+            "recv: format=%s stream=%s diarization=%s lang=%s words=%s",
+            response_format, do_stream, diarization, language_hint or "-",
+            include_words, extra=log,
         )
         if temperature is not None or prompt:
             logger.debug("ignoring unsupported params (temperature/prompt)", extra=log)
         if stream and not do_stream:
-            logger.warning(
-                "stream=true ignored for response_format=%s (not streamable)",
-                response_format, extra=log,
-            )
+            reason = "diarization on" if diarization else f"format={response_format}"
+            logger.warning("stream=true ignored (%s)", reason, extra=log)
 
         tmp_path = st.work_dir / f"upload-{rid}"
         # Decode fully into memory, then drop the upload immediately: streaming and
@@ -298,20 +323,30 @@ def create_app(settings: Settings | None = None, transcriber: Transcriber | None
                 media_type="text/event-stream",
             )
 
+        # ASR and (optionally) diarization run sequentially under the single-flight
+        # gate -- one request's GPU work at a time (SPEC §5.3 / §15.4).
         infer_start = time.monotonic()
         try:
             raw_segments = await run_in_threadpool(
                 lambda: list(transcriber.transcribe(audio, language=language_hint))
             )
+            turns = []
+            if diarization and diarizer is not None:
+                turns = await run_in_threadpool(
+                    lambda: diarizer.diarize(audio, num_speakers=num_speakers)
+                )
         finally:
             await gate.release()
         infer_ms = int((time.monotonic() - infer_start) * 1000)
 
         transcript = assemble(raw_segments, language=language_hint, duration=duration)
+        if turns:
+            transcript = apply_speakers(transcript, turns)
         logger.info(
-            "done: dur=%.1fs decode=%dms infer=%dms segments=%d words=%d format=%s",
-            duration, decode_ms, infer_ms, len(transcript.segments),
-            len(transcript.words), response_format, extra=log,
+            "done: dur=%.1fs infer=%dms segments=%d words=%d speakers=%d format=%s",
+            duration, infer_ms, len(transcript.segments), len(transcript.words),
+            len({s.speaker for s in transcript.segments if s.speaker}), response_format,
+            extra=log,
         )
         if debug_enabled():
             logger.debug("transcript text=%r", transcript.text, extra=log)

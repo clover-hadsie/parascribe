@@ -29,8 +29,8 @@ License: Apache-2.0.
 - Forensic-clean: tmpfs temp files deleted in a `finally`, content-free logs.
 - Bearer-token auth (constant-time), `/health`, serialized single-GPU inference.
 
-Phase 0 does **not** include diarization; every segment carries a `speaker`
-field that is `null`, reserved for a future diarization phase.
+Optional speaker diarization fills the per-segment `speaker` field (opt-in; see
+[Diarization](#diarization-optional)). Without it, `speaker` is `null`.
 
 ## Requirements
 
@@ -96,6 +96,10 @@ All settings are environment variables prefixed `PARASCRIBE_` (see `.env.example
 | `MAX_QUEUE` | `16` | Max admitted requests (1 in-flight + queued); beyond this returns 503. |
 | `ENABLE_VIDEO` | `false` | Accept video input (extract audio track). |
 | `DEFAULT_LANGUAGE` | (none) | ISO language hint. Accepted but IGNORED by Parakeet TDT (auto-detects); only Whisper/Canary use it. |
+| `ENABLE_DIARIZATION` | `false` | Load the diarizer at startup (needs `requirements-diarization.txt`). See [Diarization](#diarization-optional). |
+| `DIARIZATION_MODEL` | `pyannote/speaker-diarization-3.1` | pyannote pipeline (gated model). |
+| `DIARIZATION_DEVICE` | (follow ASR) | `cuda`/`cpu`. Use `cpu` to avoid VRAM contention with ASR on small cards. |
+| `HF_TOKEN` / `HF_TOKEN_FILE` | (none) | HuggingFace token for the one-time gated diarization-model download. |
 | `LOG_LEVEL` | `INFO` | Operational verbosity (content-free): `DEBUG`/`INFO`/`WARNING`/`ERROR`. |
 | `DEBUG_LOGGING` | `false` | Forces `DEBUG` and logs transcript content. WARNING: exposes content. |
 
@@ -135,7 +139,8 @@ with a Whisper/Canary backend.
 `verbose_json` always includes `segments` with real `start`/`end`. `words` are
 included when `timestamp_granularities[]` contains `word`. Whisper-only fields
 (`seek`, `tokens`, `compression_ratio`, `no_speech_prob`) are omitted;
-`avg_logprob` is provided per segment. Every segment has `speaker: null`.
+`avg_logprob` is provided per segment. `speaker` is `null` unless diarization is
+requested (see [Diarization](#diarization-optional)).
 
 ```bash
 # json (text only)
@@ -162,6 +167,40 @@ carries the assembled `segments` (and `words` if requested) -- a parascribe
 extension beyond the OpenAI streaming spec. Streaming is progressive *output*,
 not realtime input (the file is decoded and VAD-segmented first). `stream=true`
 with `srt`/`vtt`/`text` is ignored (logged) and returns the normal response.
+
+### Diarization (optional)
+
+Speaker diarization ("who said what") is opt-in per request and disabled by
+default. It runs pyannote.audio, aligns the speaker turns onto the ASR word
+timestamps, and fills the `speaker` field (otherwise `null`).
+
+Setup:
+
+1. `pip install -r requirements-diarization.txt` (heavy — pulls PyTorch).
+2. Accept the licenses for `pyannote/speaker-diarization-3.1` and
+   `pyannote/segmentation-3.0` on HuggingFace, then set `PARASCRIBE_HF_TOKEN`
+   (or `HF_TOKEN_FILE`) for the first download. It runs offline from cache after.
+3. Start with `PARASCRIBE_ENABLE_DIARIZATION=true`. On a small card shared with
+   ASR, set `PARASCRIBE_DIARIZATION_DEVICE=cpu` to avoid VRAM contention.
+
+Request it per call:
+
+```bash
+curl -s http://127.0.0.1:8000/v1/audio/transcriptions \
+  -H "Authorization: Bearer your-secret" \
+  -F file=@meeting.wav -F model=parascribe \
+  -F response_format=verbose_json -F diarization=true \
+  -F 'timestamp_granularities[]=word'        # adds per-word speaker too
+```
+
+- `diarization=true` labels each segment's `speaker` (`SPEAKER_00`, ...); opaque
+  labels only — no speaker naming/identification.
+- `num_speakers=N` optionally fixes the speaker count; omitted = automatic.
+- Speaker labels surface in `verbose_json`. Diarization is **incompatible with
+  `stream=true`** (it needs the whole file) — streaming is ignored and the
+  request returns non-streamed.
+- If `diarization=true` but the server wasn't started with it enabled, the
+  request returns **400** (never a silent no-speaker result).
 
 ### `GET /health`
 

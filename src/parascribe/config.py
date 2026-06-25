@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ExecutionProvider = Literal["cuda", "cpu", "coreml"]
+DiarizationDevice = Literal["cuda", "cpu"]
 
 
 class Settings(BaseSettings):
@@ -45,6 +46,14 @@ class Settings(BaseSettings):
     # Beyond this the server returns 503.
     max_queue: int = 16
 
+    # Diarization (Phase 1; opt-in per request, gated here at the server level)
+    enable_diarization: bool = False
+    diarization_model: str = "pyannote/speaker-diarization-3.1"
+    # None => follow the ASR provider (cuda -> cuda, else cpu).
+    diarization_device: DiarizationDevice | None = None
+    hf_token: str | None = None
+    hf_token_file: Path | None = None
+
     # Language / logging
     default_language: str | None = None
     # Operational log verbosity (content-free). debug_logging overrides this to
@@ -54,9 +63,23 @@ class Settings(BaseSettings):
 
     def resolved_api_key(self) -> str | None:
         """The configured bearer token, from api_key or api_key_file (or None)."""
-        if self.api_key:
-            return self.api_key
-        if self.api_key_file is not None and self.api_key_file.exists():
-            token = self.api_key_file.read_text(encoding="utf-8").strip()
-            return token or None
+        return self._read_secret(self.api_key, self.api_key_file)
+
+    def resolved_hf_token(self) -> str | None:
+        """HuggingFace token for the (one-time, gated) diarization model download."""
+        return self._read_secret(self.hf_token, self.hf_token_file)
+
+    @staticmethod
+    def _read_secret(value: str | None, path: Path | None) -> str | None:
+        if value:
+            return value
+        if path is not None and path.exists():
+            return path.read_text(encoding="utf-8").strip() or None
         return None
+
+    @property
+    def resolved_diarization_device(self) -> DiarizationDevice:
+        """Device for diarization: explicit setting, else follow the ASR provider."""
+        if self.diarization_device is not None:
+            return self.diarization_device
+        return "cuda" if self.execution_provider == "cuda" else "cpu"

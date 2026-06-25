@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from parascribe.align import SpeakerTurn
 from parascribe.asr import RawSegment
 from parascribe.config import Settings
 from parascribe.main import InferenceGate, QueueFullError, create_app
@@ -28,6 +29,12 @@ class FakeTranscriber:
 
     def transcribe(self, audio, *, language=None):
         yield from CANNED
+
+
+class FakeDiarizer:
+    # CANNED segments sit at 0-2s and 4-6s; split the timeline between two speakers.
+    def diarize(self, audio, *, num_speakers=None):
+        return [SpeakerTurn(0.0, 3.0, "SPEAKER_00"), SpeakerTurn(3.0, 6.0, "SPEAKER_01")]
 
 
 @pytest.fixture
@@ -59,14 +66,16 @@ def sse_events(text: str) -> list[dict]:
             if line.startswith("data: ")]
 
 
-def make_client(tmp_path: Path, **overrides) -> TestClient:
+def make_client(tmp_path: Path, *, diarizer=None, **overrides) -> TestClient:
     settings = Settings(
         execution_provider="cpu",
         work_dir=tmp_path / "work",
         api_key="secret",
         **overrides,
     )
-    return TestClient(create_app(settings=settings, transcriber=FakeTranscriber()))
+    return TestClient(
+        create_app(settings=settings, transcriber=FakeTranscriber(), diarizer=diarizer)
+    )
 
 
 def post(client, wav, *, key="secret", **data):
@@ -184,6 +193,45 @@ class TestVideoGating:
     def test_video_accepted_when_enabled(self, tmp_path, video):
         with make_client(tmp_path, enable_video=True) as client:
             assert post(client, video).status_code == 200
+
+
+class TestDiarization:
+    def test_requested_but_not_enabled_is_400(self, tmp_path, wav):
+        with make_client(tmp_path) as client:  # no diarizer injected
+            assert post(client, wav, diarization="true").status_code == 400
+
+    def test_populates_segment_speaker_labels(self, tmp_path, wav):
+        with make_client(tmp_path, diarizer=FakeDiarizer()) as client:
+            r = post(client, wav, response_format="verbose_json", diarization="true")
+            segs = r.json()["segments"]
+            assert segs[0]["speaker"] == "SPEAKER_00"
+            assert segs[1]["speaker"] == "SPEAKER_01"
+
+    def test_words_get_speaker_with_word_granularity(self, tmp_path, wav):
+        with make_client(tmp_path, diarizer=FakeDiarizer()) as client:
+            r = post(
+                client, wav, response_format="verbose_json", diarization="true",
+                **{"timestamp_granularities[]": "word"},
+            )
+            words = r.json()["words"]
+            assert all("speaker" in w for w in words)
+
+    def test_no_speaker_field_on_words_without_diarization(self, tmp_path, wav):
+        with make_client(tmp_path, diarizer=FakeDiarizer()) as client:
+            r = post(
+                client, wav, response_format="verbose_json",
+                **{"timestamp_granularities[]": "word"},
+            )
+            assert all("speaker" not in w for w in r.json()["words"])
+
+    def test_stream_with_diarization_falls_back_to_non_streamed(self, tmp_path, wav):
+        with make_client(tmp_path, diarizer=FakeDiarizer()) as client:
+            r = post(
+                client, wav, response_format="verbose_json",
+                diarization="true", stream="true",
+            )
+            assert not r.headers["content-type"].startswith("text/event-stream")
+            assert r.json()["segments"][0]["speaker"] == "SPEAKER_00"
 
 
 class TestInferenceGate:

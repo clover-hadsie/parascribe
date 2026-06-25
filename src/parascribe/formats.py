@@ -36,7 +36,10 @@ def _segment_dict(seg: Segment) -> dict[str, object]:
 
 
 def _word_dict(word: Word) -> dict[str, object]:
-    return {"word": word.word, "start": word.start, "end": word.end}
+    body: dict[str, object] = {"word": word.word, "start": word.start, "end": word.end}
+    if word.speaker is not None:  # only present when diarization ran
+        body["speaker"] = word.speaker
+    return body
 
 
 def verbose_json_body(transcript: Transcript, *, include_words: bool) -> dict[str, object]:
