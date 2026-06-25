@@ -41,11 +41,12 @@ _PROGRESS_STEP_THRESHOLD_S = 600.0
 
 
 class _ProgressLogger:
-    """A pyannote hook that logs per-stage diarization progress at % milestones.
+    """A pyannote hook that logs diarization progress.
 
-    Fire-and-forget: it only emits log lines (segmentation/embeddings/clustering
-    at e.g. 10%/20%/...), so a long CPU run isn't silent. Nothing is returned to
-    the caller.
+    Fire-and-forget: announces each stage (segmentation/embeddings/clustering),
+    and additionally logs % milestones for the slow **embeddings** stage so a long
+    CPU run shows real progress there. Segmentation is fast and clustering is
+    effectively one-shot, so those get only a start line. Nothing is returned.
     """
 
     def __init__(self, rid: str, step_pct: int) -> None:
@@ -61,11 +62,15 @@ class _ProgressLogger:
         total: int | None = None,
         completed: int | None = None,
     ) -> None:
-        if not total or completed is None:
+        if step_name not in self._last:
+            self._last[step_name] = 0
+            logger.info("diarization: %s started", step_name, extra={"rid": self._rid})
+        # Percentages only for the slow embeddings stage; others are fast/one-shot.
+        if "embed" not in step_name.lower() or not total or completed is None:
             return
         pct = int(completed / total * 100)
         bucket = pct - (pct % self._step_pct)
-        if bucket >= self._step_pct and bucket > self._last.get(step_name, 0):
+        if bucket >= self._step_pct and bucket > self._last[step_name]:
             self._last[step_name] = bucket
             logger.info("diarization: %s %d%%", step_name, bucket, extra={"rid": self._rid})
 
@@ -82,6 +87,10 @@ class Diarizer:
             # for file decoding; silence its noisy CUDA-lib load failure at import.
             warnings.filterwarnings(
                 "ignore", category=UserWarning, module=r"pyannote\.audio\.core\.io"
+            )
+            # Benign: pyannote's stats pooling computes std over 1-frame windows.
+            warnings.filterwarnings(
+                "ignore", message=r"std\(\): degrees of freedom is <= 0"
             )
             from pyannote.audio import Pipeline
         except ImportError as exc:
