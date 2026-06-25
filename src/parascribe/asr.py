@@ -98,6 +98,10 @@ class Transcriber:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         providers = build_providers(settings)
+        if settings.execution_provider == "cuda" and hasattr(ort, "preload_dlls"):
+            # Load CUDA/cuDNN from the nvidia-*-cu12 pip wheels (requirements-gpu.txt)
+            # so they don't need to be on LD_LIBRARY_PATH.
+            ort.preload_dlls()
         logger.info(
             "loading model %s on %s", settings.model_id, settings.execution_provider
         )
