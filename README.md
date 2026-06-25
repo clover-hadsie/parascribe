@@ -1,36 +1,20 @@
 # parascribe
 
-A thin, self-hostable HTTP server that exposes the OpenAI
-`/v1/audio/transcriptions` API in front of an [`onnx-asr`](https://github.com/istupakov/onnx-asr)
-Parakeet TDT model (NVIDIA Parakeet TDT 0.6B v3,
-[`istupakov/parakeet-tdt-0.6b-v3-onnx`](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx)),
-**on GPU, with correct word/segment timestamps**, so it can sit behind a LiteLLM
-gateway like any other model.
-
-It exists because the common alternatives each miss a requirement: Speaches
-refuses `verbose_json` (no timestamps) for the Parakeet backend, and the Go
-`achetronic/parakeet` server is CPU-only. parascribe gives you **timestamps AND
-GPU** behind an OpenAI-compatible surface.
-
-License: Apache-2.0.
+parascribe is a self-hosted transcription server built on NVIDIA's Parakeet
+speech-to-text models. Hand it an audio or video file and it returns a transcript
+with word- and segment-level timestamps, running on your own GPU.
 
 ## Features
 
-- OpenAI-compatible `POST /v1/audio/transcriptions` (`json`, `text`,
-  `verbose_json`, `srt`, `vtt`).
-- Real word- and segment-level timestamps, correct against the original
-  timeline even for multi-hour files (VAD chunking via onnx-asr; per-token
-  offsetting + word grouping in `stitch.py`).
-- Timestamps are emitted by default for `verbose_json` (does not depend on the
-  `timestamp_granularities[]` param, which LiteLLM is known to drop).
-- GPU-or-fail-loudly: refuses to start on CPU when configured for CUDA.
-- Server-Sent Events streaming for long files (`stream=true`).
-- Optional video input (audio track extracted via ffmpeg).
-- Forensic-clean: tmpfs temp files deleted in a `finally`, content-free logs.
-- Bearer-token auth (constant-time), `/health`, serialized single-GPU inference.
-
-Optional speaker diarization fills the per-segment `speaker` field (opt-in; see
-[Diarization](#diarization-optional)). Without it, `speaker` is `null`.
+- OpenAI-compatible using the `/v1/audio/transcriptions` API endpoint.
+- Transcripts with word- and segment-level timestamps.
+- Supports long / multi-hour recordings.
+- Runs on your GPU / CUDA.
+- Output formats include `json`, `text`, `verbose_json`, `srt`, `vtt`.
+- Streaming support (`stream=true`).
+- Optional audio extraction from video (enable with `ENABLE_VIDEO`).
+- Optional speaker diarization (see [Diarization](#diarization-optional)).
+- Bearer-token auth and a `/health` endpoint.
 
 ## Requirements
 
@@ -92,7 +76,7 @@ All settings are environment variables prefixed `PARASCRIBE_` (see `.env.example
 | `MAX_CHUNK_S` | `24` | Max VAD speech-segment length (onnx-asr `max_speech_duration_s`). |
 | `CHUNK_OVERLAP_S` | `0` | VAD pad (onnx-asr `speech_pad_ms`). 0 = cut cleanly at silence. |
 | `VAD_THRESHOLD` | `0.5` | Silero VAD threshold. |
-| `MAX_UPLOAD_MB` | `2048` | Max upload size; larger returns 413. |
+| `MAX_UPLOAD_MB` | `2048` | Max *upload* size; larger returns 413. Note: the upload is decoded fully into RAM as a 16 kHz float32 array (~115 MB/hour), so peak memory tracks decoded duration, not upload bytes — a small compressed file can expand to GBs. |
 | `MAX_QUEUE` | `16` | Max admitted requests (1 in-flight + queued); beyond this returns 503. |
 | `ENABLE_VIDEO` | `false` | Accept video input (extract audio track). |
 | `DEFAULT_LANGUAGE` | (none) | ISO language hint. Accepted but IGNORED by Parakeet TDT (auto-detects); only Whisper/Canary use it. |
@@ -103,28 +87,6 @@ All settings are environment variables prefixed `PARASCRIBE_` (see `.env.example
 | `LOG_LEVEL` | `INFO` | Operational verbosity (content-free): `DEBUG`/`INFO`/`WARNING`/`ERROR`. |
 | `DEBUG_LOGGING` | `false` | Forces `DEBUG` and logs transcript content. WARNING: exposes content. |
 
-## Logging
-
-parascribe owns the `parascribe` logger (its own handler, does not depend on
-uvicorn's logging config), so its lines always appear. Each request gets a short
-`rid` that threads through every line for that request:
-
-```
-2026-06-24 11:40:01 INFO    parascribe.main rid=a1b2c3d4 | recv: format=verbose_json stream=False lang=- words=True
-2026-06-24 11:40:03 INFO    parascribe.main rid=a1b2c3d4 | done: dur=11.0s decode=48ms infer=1820ms segments=4 words=22 format=verbose_json
-```
-
-- `LOG_LEVEL=INFO` (default) logs request receipt, a per-request timing summary
-  (decode ms, inference ms, segment/word counts), 503s, and decode failures.
-  **No transcript text, segment text, or filenames** appear at INFO.
-- `LOG_LEVEL=DEBUG` adds decode timing detail and other diagnostics, still
-  content-free.
-- `DEBUG_LOGGING=true` forces `DEBUG` **and** additionally logs the transcript
-  text (gated, with a startup warning) for deep debugging. Keep it off in
-  production (invariant: content-free logs).
-
-Under systemd these go to the journal (`journalctl -u parascribe -f`).
-
 ## API
 
 ### `POST /v1/audio/transcriptions` (multipart/form-data)
@@ -134,13 +96,16 @@ compatibility), `response_format`, `timestamp_granularities[]`, `language`,
 `stream`, `temperature`, `prompt`. `temperature`/`prompt` are accepted and
 ignored (logged) since the backend does not use them. `language` is likewise
 accepted but ignored by Parakeet TDT (it auto-detects); it would only take effect
-with a Whisper/Canary backend.
+with a Whisper/Canary backend. Note the `language` field in the **response** is
+just the echoed request hint (or `null`) — it is not a detected language, so
+`language=en` over French audio returns `"language": "en"` with French text.
 
 `verbose_json` always includes `segments` with real `start`/`end`. `words` are
 included when `timestamp_granularities[]` contains `word`. Whisper-only fields
 (`seek`, `tokens`, `compression_ratio`, `no_speech_prob`) are omitted;
-`avg_logprob` is provided per segment. `speaker` is `null` unless diarization is
-requested (see [Diarization](#diarization-optional)).
+`avg_logprob` (the mean token log-probability, not exponentiated) is provided per
+segment. `speaker` is `null` unless diarization is requested (see
+[Diarization](#diarization-optional)).
 
 ```bash
 # json (text only)
@@ -167,6 +132,10 @@ carries the assembled `segments` (and `words` if requested) -- a parascribe
 extension beyond the OpenAI streaming spec. Streaming is progressive *output*,
 not realtime input (the file is decoded and VAD-segmented first). `stream=true`
 with `srt`/`vtt`/`text` is ignored (logged) and returns the normal response.
+
+If transcription fails mid-stream, the SSE stream ends **without** a
+`transcript.text.done` event (the server logs the error); a client should treat a
+stream that never delivers the terminal `done` event as a failed transcription.
 
 ### Diarization (optional)
 
@@ -208,36 +177,25 @@ curl -s http://127.0.0.1:8000/v1/audio/transcriptions \
 {"status": "ok", "model_id": "...", "device": "cuda:0", "provider_active": true}
 ```
 
-## Pascal / ONNX Runtime pin
-
-Target hardware includes a **GTX 1080 Ti (Pascal, sm_61)**. Some prebuilt
-`onnxruntime-gpu` wheels drop old compute capabilities and would silently fall
-back to CPU -- which parascribe refuses to do. `requirements-gpu.txt` pins
-**`onnxruntime-gpu==1.24.4`**, the version verified running on the target card
-(via the existing Speaches deployment); it is a CUDA-12 build and CUDA 12 still
-includes sm_61. Do not float this dependency. The startup GPU check (and
-`scripts/check_gpu.py`) is what catches a bad wheel before it reaches
-production.
-
-On hardened kernels that reject executable stacks, NVIDIA/onnxruntime `.so`
-files may need `patchelf --clear-execstack <file>` (the same fix the Speaches
-deployment applies to ctranslate2). If the model fails to load with an execstack
-error, run `patchelf --clear-execstack` over the offending library in
-`.venv/lib/python3.12/site-packages/onnxruntime*`.
-
-## Development
-
-```bash
-.venv/bin/python -m pytest        # full suite
-.venv/bin/ruff check src tests
-.venv/bin/mypy
-```
-
-The offset/word-grouping logic (`stitch.py`) is the correctness-critical core and
-is unit-tested in isolation (`tests/test_stitch.py`). GPU integration tests are
-marked `gpu` and skipped where no CUDA device is present.
-
 ## Deployment
 
 See `deploy/parascribe.service` for a hardened systemd unit (dedicated user,
 tmpfs `RuntimeDirectory`, GPU device allow-list, writable HF cache).
+
+## Known issues
+
+- **Diarization runs on CPU only.** pyannote's GPU PyTorch can't share a process
+  with onnxruntime-gpu — they collide over bundled CUDA libraries (an
+  `ncclCommResume` / cuDNN symbol clash) — so diarization needs the CPU torch
+  build (see `requirements-diarization.txt`) with `PARASCRIBE_DIARIZATION_DEVICE=cpu`.
+  On long files that's slow (roughly real-time). GPU diarization is on the
+  [roadmap](ROADMAP.md).
+- **In-flight requests can't be cancelled.** Inference runs in a worker thread, so
+  a long request can't be interrupted and blocks graceful shutdown (`kill -9` to
+  force). Moving inference to a subprocess is on the roadmap.
+- **Diarization can over-count speakers on noisy audio.** pyannote may spawn extra
+  low-activity labels; pass `num_speakers=N` when you know the count.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

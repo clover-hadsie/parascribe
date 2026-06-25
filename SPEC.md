@@ -15,7 +15,7 @@ because existing servers each fail one requirement: Speaches refuses
 `verbose_json` for Parakeet (no timestamps), and the Go `achetronic/parakeet`
 server is CPU-only. We need **timestamps AND GPU**, behind a LiteLLM gateway.
 
-Published open-source (Apache-2.0). Write for strangers: clean README, typed,
+Published open-source (MIT). Write for strangers: clean README, typed,
 tested, documented config.
 
 ## 2. Phase scope
@@ -53,7 +53,7 @@ chunking; OpenAI-compatible shapes; one model and one inference at a time.
   extraction.
 - **pytest** for tests; **ruff** + **mypy** for lint/type.
 - Config via **pydantic-settings** (env vars).
-- License: **Apache-2.0**.
+- License: **MIT**.
 
 ## 5. Inference layer
 
@@ -330,7 +330,7 @@ parascribe/
   pyproject.toml          # tool config (ruff/mypy/pytest); deps via requirements*
   .env.example            # documented config
   README.md               # what/why, venv install, config table, Pascal note, curl examples
-  LICENSE                 # Apache-2.0
+  LICENSE                 # MIT
   CLAUDE.md               # invariants + conventions
   SPEC.md                 # this document (single source of truth)
   src/parascribe/

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "OpenAI-compatible Parakeet ASR server with GPU timestamps, behind LiteLLM."
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "Apache-2.0" }
+license = { text = "MIT" }
 
 # Dependencies are managed via the pinned requirements*.txt files (venv + pip),
 # not via this table, so the onnxruntime CPU/GPU split stays explicit.

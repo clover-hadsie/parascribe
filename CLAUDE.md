@@ -2,7 +2,7 @@
 
 OpenAI-compatible transcription server fronting an `onnx-asr` Parakeet TDT model,
 on GPU, with correct timestamps. Sits behind a LiteLLM gateway. Open source
-(Apache-2.0) — write it for strangers: clean README, typed, tested.
+(MIT) — write it for strangers: clean README, typed, tested.
 
 `SPEC.md` is the source of truth. If something is not covered there, ask rather
 than guessing. After behavior-changing work, note if `SPEC.md` needs updating.
