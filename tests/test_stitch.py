@@ -130,3 +130,14 @@ class TestAssemble:
         assert t.text == ""
         assert t.segments == []
         assert t.words == []
+
+    def test_empty_text_segments_are_dropped_with_contiguous_ids(self):
+        segs = [
+            raw(0.0, 1.0, "Hello.", [" Hello", "."], [0.0, 0.4]),
+            raw(1.0, 1.3, "", [], []),  # VAD region, no recognized speech
+            raw(2.0, 3.0, "World.", [" World", "."], [0.0, 0.5]),
+        ]
+        t = assemble(segs, language="en", duration=3.0)
+        assert [s.text for s in t.segments] == ["Hello.", "World."]
+        assert [s.id for s in t.segments] == [0, 1]  # contiguous, no gap from the drop
+        assert t.text == "Hello. World."

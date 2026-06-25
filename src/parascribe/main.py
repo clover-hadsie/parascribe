@@ -128,13 +128,14 @@ async def _stream_events(
             if item is sentinel:
                 break
             assert isinstance(item, RawSegment)
+            if not item.text.strip():
+                continue  # drop VAD regions with no recognized speech (matches assemble)
             segment, seg_words = offset_segment(seg_id, item)
             seg_id += 1
             segments.append(segment)
             words.extend(seg_words)
-            if segment.text:
-                texts.append(segment.text)
-                yield sse_event(delta_event(segment.text + " "))
+            texts.append(segment.text)
+            yield sse_event(delta_event(segment.text + " "))
         await worker  # surface any exception raised inside the producer thread
         transcript = Transcript(
             text=" ".join(texts), language=language_hint, duration=duration,

@@ -108,16 +108,23 @@ def offset_segment(seg_id: int, raw: RawSegment) -> tuple[Segment, list[Word]]:
 def assemble(
     raw_segments: Iterable[RawSegment], *, language: str | None, duration: float
 ) -> Transcript:
-    """Assemble VAD segments into a unified transcript with global timestamps."""
+    """Assemble VAD segments into a unified transcript with global timestamps.
+
+    VAD regions that the ASR transcribed to nothing (a breath, a click) are
+    dropped, and segment ids stay contiguous over the kept segments.
+    """
     segments: list[Segment] = []
     words: list[Word] = []
     texts: list[str] = []
-    for seg_id, raw in enumerate(raw_segments):
-        segment, seg_words = offset_segment(seg_id, raw)
+    next_id = 0
+    for raw in raw_segments:
+        if not raw.text.strip():
+            continue
+        segment, seg_words = offset_segment(next_id, raw)
+        next_id += 1
         segments.append(segment)
         words.extend(seg_words)
-        if segment.text:
-            texts.append(segment.text)
+        texts.append(segment.text)
     return Transcript(
         text=" ".join(texts),
         language=language,
