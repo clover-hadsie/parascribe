@@ -33,7 +33,7 @@ class FakeTranscriber:
 
 class FakeDiarizer:
     # CANNED segments sit at 0-2s and 4-6s; split the timeline between two speakers.
-    def diarize(self, audio, *, num_speakers=None):
+    def diarize(self, audio, *, num_speakers=None, rid="-"):
         return [SpeakerTurn(0.0, 3.0, "SPEAKER_00"), SpeakerTurn(3.0, 6.0, "SPEAKER_01")]
 
 

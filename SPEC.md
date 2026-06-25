@@ -480,6 +480,20 @@ path. Loaded once at startup like the ASR model when `enable_diarization=true`.
   the PyTorch CUDA build runs on the 1080 Ti, or run diarization on CPU there. The
   3090 validates functionality; the 1080 Ti is the deploy risk.
 
+### 15.7a Sortformer-ONNX (investigated, deferred)
+
+NVIDIA Sortformer (end-to-end NeMo diarizer) was spiked as a stack-native
+alternative: its community ONNX export *does* run on onnxruntime (no torch, GPU
+on Pascal), which would be a better fit than pyannote. Deferred because using it
+properly requires porting NVIDIA's streaming Arrival-Order-Speaker-Cache loop
+(fixed 124-frame chunks + spkcache/fifo state management + cache compression) by
+hand from the parakeet-rs reference — a substantial, blind port (no ground truth
+on hand). NeMo itself (what Scriberr uses) hides this behind one `.diarize()`
+call but pulls the full PyTorch/NeMo stack. **Revisit if diarization becomes
+heavily used**; a validation reference (NeMo/Scriberr output on a fixed clip)
+would de-risk the port. Mel recipe captured: n_fft=512, win=400, hop=160,
+preemph=0.97, 128 Slaney mel, `log(mel + 2^-24)`, no normalization.
+
 ### 15.8 Testing
 
 - **Alignment unit tests** (highest priority): synthetic turns + words → expected

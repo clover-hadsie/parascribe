@@ -333,7 +333,7 @@ def create_app(
             turns = []
             if diarization and diarizer is not None:
                 turns = await run_in_threadpool(
-                    lambda: diarizer.diarize(audio, num_speakers=num_speakers)
+                    lambda: diarizer.diarize(audio, num_speakers=num_speakers, rid=rid)
                 )
         finally:
             await gate.release()
