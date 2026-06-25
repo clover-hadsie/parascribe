@@ -51,9 +51,9 @@ class QueueFullError(RuntimeError):
 class InferenceGate:
     """Serialize inference to one in-flight call and bound total admitted requests.
 
-    The semaphore guarantees a single GPU forward pass at a time (SPEC §5.3); the
-    capacity counter bounds running + queued so an overload sheds load with 503
-    instead of growing an unbounded wait queue.
+    The semaphore guarantees a single GPU forward pass at a time; the capacity
+    counter bounds running + queued so an overload sheds load with 503 instead of
+    growing an unbounded wait queue.
     """
 
     def __init__(self, capacity: int) -> None:
@@ -71,6 +71,8 @@ class InferenceGate:
         try:
             await self._sem.acquire()
         except BaseException:
+            # Cancelled/interrupted while waiting: give the admitted slot back
+            # before propagating so the capacity counter stays accurate.
             async with self._guard:
                 self._admitted -= 1
             raise
@@ -217,6 +219,8 @@ def create_app(
     async def create_transcription(
         request: Request,
         file: Annotated[UploadFile, File()],
+        # Required for OpenAI compatibility; this server serves the one configured
+        # model, so the value is accepted but not used for routing.
         model: Annotated[str, Form()],
         response_format: Annotated[str, Form()] = "json",
         language: Annotated[str | None, Form()] = None,
@@ -226,7 +230,8 @@ def create_app(
         diarization: Annotated[bool, Form()] = False,
         num_speakers: Annotated[int | None, Form()] = None,
         # OpenAI sends `timestamp_granularities[]`; some clients send the bare key.
-        # Accept both. LiteLLM is known to drop this entirely (invariant #1).
+        # Accept both. A gateway may drop this param entirely, which is why
+        # verbose_json emits segments regardless of whether it arrives.
         timestamp_granularities_bracket: Annotated[
             list[str] | None, Form(alias="timestamp_granularities[]")
         ] = None,
@@ -280,7 +285,7 @@ def create_app(
         tmp_path = st.work_dir / f"upload-{rid}"
         # Decode fully into memory, then drop the upload immediately: streaming and
         # non-streaming alike work from the in-memory array, so the temp file never
-        # outlives decode (forensic cleanliness, invariant #3).
+        # outlives decode (keeps uploaded media off disk beyond the request).
         decode_start = time.monotonic()
         try:
             await _save_upload(file, tmp_path, st.max_upload_mb * 1024 * 1024)
@@ -324,7 +329,7 @@ def create_app(
             )
 
         # ASR and (optionally) diarization run sequentially under the single-flight
-        # gate -- one request's GPU work at a time (SPEC §5.3 / §15.4).
+        # gate -- one request's GPU work at a time.
         infer_start = time.monotonic()
         try:
             raw_segments = await run_in_threadpool(

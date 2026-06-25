@@ -51,7 +51,7 @@ class RawSegment:
 
 
 class GpuUnavailableError(RuntimeError):
-    """Raised when GPU is configured but not actually engaged (invariant #2)."""
+    """Raised when GPU is configured but not actually engaged."""
 
 
 def build_providers(settings: Settings) -> ProviderSpec:
@@ -92,7 +92,7 @@ class Transcriber:
     """Holds the single loaded model + VAD and produces VAD segments.
 
     Constructed once at startup. ``transcribe`` is NOT internally serialized;
-    callers must hold the single-flight lock (SPEC §5.3) around it.
+    callers must hold the single-flight lock around it.
     """
 
     def __init__(self, settings: Settings) -> None:
@@ -135,7 +135,7 @@ class Transcriber:
             raise GpuUnavailableError(
                 "execution_provider=cuda but the model is running on "
                 f"{sorted(self.providers_active)}; CUDA failed to initialize "
-                "(incompatible wheel for this GPU? see SPEC §8). Refusing to "
+                "(incompatible onnxruntime-gpu wheel for this GPU?). Refusing to "
                 "fall back to CPU."
             )
 

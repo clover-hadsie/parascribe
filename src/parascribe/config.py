@@ -42,11 +42,11 @@ class Settings(BaseSettings):
     work_dir: Path = Path("/run/parascribe")
     max_upload_mb: int = 2048
     enable_video: bool = False
-    # Max requests admitted at once (1 in-flight + the rest queued, SPEC §5.3).
-    # Beyond this the server returns 503.
+    # Max requests admitted at once (1 in-flight + the rest queued). Beyond this
+    # the server returns 503.
     max_queue: int = 16
 
-    # Diarization (Phase 1; opt-in per request, gated here at the server level)
+    # Diarization (opt-in per request, gated here at the server level)
     enable_diarization: bool = False
     diarization_model: str = "pyannote/speaker-diarization-3.1"
     # None => follow the ASR provider (cuda -> cuda, else cpu).

@@ -1,4 +1,4 @@
-"""Align diarization speaker turns onto ASR words and segments (Phase 1 crux).
+"""Align diarization speaker turns onto ASR words and segments.
 
 Pure: given a Transcript (global word/segment timestamps) and a list of speaker
 turns, assign each word to the turn it overlaps most, and each segment to the

@@ -3,7 +3,7 @@
 Operational logs (request ids, timings, counts) are content-free and emitted at
 the configured ``log_level`` (default INFO). ``debug_logging`` forces DEBUG and is
 the ONLY switch that permits content (transcript text, language) into the logs;
-it logs a loud warning when enabled (invariant #3).
+it logs a loud warning when enabled.
 
 Call :func:`configure_logging` once at startup. It owns the ``parascribe`` logger
 (its own handler, ``propagate=False``) so app logs appear regardless of how the
@@ -20,7 +20,6 @@ if TYPE_CHECKING:
 
 _LOGGER_NAME = "parascribe"
 _FORMAT = "%(asctime)s %(levelname)-7s %(name)s rid=%(rid)s | %(message)s"
-_PLAIN_FORMAT = "%(asctime)s %(levelname)-7s %(name)s | %(message)s"
 
 
 class _RidFilter(logging.Filter):

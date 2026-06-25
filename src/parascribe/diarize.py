@@ -1,17 +1,14 @@
-"""Speaker diarization via pyannote.audio (Phase 1).
+"""Speaker diarization via pyannote.audio.
 
 pyannote + torch are heavy and optional (requirements-diarization.txt), so they
-are imported lazily inside the Diarizer rather than at module import. This module
-stays importable without them; the API layer constructs a Diarizer only when
-``enable_diarization`` is set, and surfaces DiarizationUnavailableError clearly
-if the deps or gated models are missing (never a silent no-speaker fallback).
+are imported lazily inside the Diarizer rather than at module import: this module
+stays importable without them, and the API layer constructs a Diarizer only when
+``enable_diarization`` is set, raising DiarizationUnavailableError when the deps or
+gated models are missing (never a silent no-speaker fallback).
 
-The model produces opaque speaker labels (SPEAKER_00, ...). Diarization runs the
-whole file (clustering is global), so it is not streamable.
-
-NOTE: targets pyannote.audio 4.x (modern huggingface_hub `token=` API). The gated
-models require a HuggingFace token + license acceptance for the first download;
-validate on GPU hardware.
+The model produces opaque speaker labels (SPEAKER_00, ...) and runs over the whole
+file (clustering is global), so it is not streamable. The gated pyannote models
+require a HuggingFace token and license acceptance for the first download.
 """
 
 from __future__ import annotations
@@ -134,8 +131,8 @@ class Diarizer:
         result = self._pipeline(
             {"waveform": waveform, "sample_rate": SAMPLE_RATE}, **params
         )
-        # pyannote 4.x returns a DiarizeOutput wrapping the Annotation in
-        # `.speaker_diarization`; 3.x returned the Annotation directly.
+        # The pipeline result wraps the Annotation in `.speaker_diarization`;
+        # fall back to the result itself if it is already an Annotation.
         annotation = getattr(result, "speaker_diarization", result)
         return [
             SpeakerTurn(start=turn.start, end=turn.end, speaker=speaker)

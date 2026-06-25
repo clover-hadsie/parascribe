@@ -1,4 +1,4 @@
-"""End-to-end integration against the real model (SPEC §11).
+"""End-to-end integration against the real model.
 
 Opt-in and slow (downloads ~2GB on first run). Skipped unless
 PARASCRIBE_RUN_MODEL_TESTS=1 is set. Runs on CPU for dev; mark `gpu` so a CUDA

@@ -1,4 +1,4 @@
-"""Unit tests for diarization-to-ASR speaker alignment (Phase 1 crux)."""
+"""Unit tests for diarization-to-ASR speaker alignment."""
 
 from __future__ import annotations
 

@@ -2,7 +2,7 @@
 
 onnx-asr already gives absolute segment ``start``/``end`` (it owns VAD chunking),
 so there is no cross-chunk segment stitching to do. What remains, and what is
-easy to get subtly wrong (invariant #4), is:
+easy to get subtly wrong, is:
 
   * token ``timestamps`` are LOCAL to each segment (they restart at 0.0) -> add
     the segment's absolute ``start`` to every token timestamp;

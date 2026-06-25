@@ -6,7 +6,7 @@ Run on the deployment host to confirm GPU engagement in one command:
     .venv/bin/python scripts/check_gpu.py
 
 Exits non-zero if execution_provider=cuda but CUDA is not actually engaged
-(the same condition that makes the server refuse to start, invariant #2).
+(the same condition that makes the server refuse to start).
 """
 
 from __future__ import annotations

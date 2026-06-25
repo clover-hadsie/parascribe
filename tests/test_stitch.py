@@ -1,7 +1,7 @@
 """Unit tests for the crux: token offsetting + subword->word grouping + assembly.
 
-These are the highest-priority tests in the project (SPEC §11, invariant #4).
-They run against synthetic RawSegment inputs with known offsets, no model.
+The highest-priority tests in the project: they run against synthetic RawSegment
+inputs with known offsets, no model.
 """
 
 from __future__ import annotations

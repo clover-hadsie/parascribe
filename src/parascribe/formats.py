@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from parascribe.stitch import Segment, Transcript, Word
 
 ALLOWED_FORMATS = ("json", "text", "verbose_json", "srt", "vtt")
-# Formats whose output can be streamed incrementally (SPEC §10). srt/vtt/text fall
-# back to a single non-streamed response.
+# Formats whose output can be streamed incrementally; srt/vtt/text fall back to a
+# single non-streamed response.
 STREAMABLE_FORMATS = ("json", "verbose_json")
 
 
@@ -30,7 +30,7 @@ def _segment_dict(seg: Segment) -> dict[str, object]:
         "start": seg.start,
         "end": seg.end,
         "text": seg.text,
-        "speaker": seg.speaker,  # null in Phase 0 (diarization forward-compat)
+        "speaker": seg.speaker,  # opaque label, or null when diarization didn't run
         "avg_logprob": seg.avg_logprob,
     }
 
@@ -43,7 +43,7 @@ def _word_dict(word: Word) -> dict[str, object]:
 
 
 def verbose_json_body(transcript: Transcript, *, include_words: bool) -> dict[str, object]:
-    """The verbose_json object. Segments are ALWAYS present (invariant #1)."""
+    """The verbose_json object. Segments are ALWAYS present."""
     body: dict[str, object] = {
         "task": "transcribe",
         "language": transcript.language,
@@ -85,7 +85,7 @@ def to_vtt(transcript: Transcript) -> str:
 
 
 def sse_event(payload: dict[str, object]) -> str:
-    """Serialize one Server-Sent Event line for streaming (SPEC §10)."""
+    """Serialize one Server-Sent Event line for streaming."""
     return f"data: {json.dumps(payload)}\n\n"
 
 
