@@ -131,6 +131,19 @@ class TestAssemble:
         assert t.segments == []
         assert t.words == []
 
+    def test_token_count_sums_subwords_over_kept_segments(self, transcript):
+        # 4 tokens in the first segment + 2 in the second.
+        assert transcript.token_count == 6
+
+    def test_token_count_excludes_dropped_empty_segments(self):
+        segs = [
+            raw(0.0, 1.0, "Hello.", [" Hello", "."], [0.0, 0.4]),
+            raw(1.0, 1.3, "", [" noise"], [0.0]),  # dropped: no recognized speech
+            raw(2.0, 3.0, "World.", [" World", "."], [0.0, 0.5]),
+        ]
+        t = assemble(segs, language="en", duration=3.0)
+        assert t.token_count == 4  # only the two kept segments' tokens
+
     def test_empty_text_segments_are_dropped_with_contiguous_ids(self):
         segs = [
             raw(0.0, 1.0, "Hello.", [" Hello", "."], [0.0, 0.4]),

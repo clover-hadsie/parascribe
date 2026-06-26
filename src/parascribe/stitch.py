@@ -49,6 +49,8 @@ class Transcript:
     duration: float
     segments: list[Segment] = field(default_factory=list)
     words: list[Word] = field(default_factory=list)
+    # Total ASR subword tokens over kept segments; source for the "token" usage unit.
+    token_count: int = 0
 
 
 def _group_words(tokens: list[str], global_ts: list[float], seg_end: float) -> list[Word]:
@@ -117,6 +119,7 @@ def assemble(
     segments: list[Segment] = []
     words: list[Word] = []
     texts: list[str] = []
+    token_count = 0
     next_id = 0
     for raw in raw_segments:
         if not raw.text.strip():
@@ -126,10 +129,12 @@ def assemble(
         segments.append(segment)
         words.extend(seg_words)
         texts.append(segment.text)
+        token_count += len(raw.tokens)
     return Transcript(
         text=" ".join(texts),
         language=language,
         duration=round(duration, _PRECISION),
         segments=segments,
         words=words,
+        token_count=token_count,
     )

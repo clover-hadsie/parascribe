@@ -95,7 +95,11 @@ def delta_event(text: str) -> dict[str, object]:
 
 
 def done_event(
-    transcript: Transcript, *, response_format: str, include_words: bool
+    transcript: Transcript,
+    *,
+    response_format: str,
+    include_words: bool,
+    usage: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """The terminal transcript.text.done event carrying the full result.
 
@@ -107,17 +111,34 @@ def done_event(
         payload["segments"] = [_segment_dict(s) for s in transcript.segments]
         if include_words:
             payload["words"] = [_word_dict(w) for w in transcript.words]
+    if usage is not None:
+        payload["usage"] = usage
     return payload
 
 
-def render(transcript: Transcript, response_format: str, *, include_words: bool) -> Rendered:
-    """Render ``transcript`` for the given (already-validated) response_format."""
+def render(
+    transcript: Transcript,
+    response_format: str,
+    *,
+    include_words: bool,
+    usage: dict[str, object] | None = None,
+) -> Rendered:
+    """Render ``transcript`` for the given (already-validated) response_format.
+
+    ``usage`` is attached to the JSON bodies only; text/srt/vtt have nowhere to
+    carry it.
+    """
     if response_format == "text":
         return Rendered(transcript.text, "text/plain; charset=utf-8")
     if response_format == "json":
-        return Rendered(json.dumps({"text": transcript.text}), "application/json")
+        body: dict[str, object] = {"text": transcript.text}
+        if usage is not None:
+            body["usage"] = usage
+        return Rendered(json.dumps(body), "application/json")
     if response_format == "verbose_json":
         body = verbose_json_body(transcript, include_words=include_words)
+        if usage is not None:
+            body["usage"] = usage
         return Rendered(json.dumps(body), "application/json")
     if response_format == "srt":
         return Rendered(to_srt(transcript), "application/x-subrip; charset=utf-8")

@@ -32,6 +32,7 @@ from parascribe.formats import (
 from parascribe.log import configure_logging, debug_enabled
 from parascribe.media import DecodeError, contains_video, decode_to_pcm, duration_seconds
 from parascribe.stitch import Transcript, assemble, offset_segment
+from parascribe.usage import build_usage
 
 if TYPE_CHECKING:
     import numpy as np
@@ -95,6 +96,7 @@ async def _stream_events(
     gate: InferenceGate,
     audio: Audio,
     *,
+    settings: Settings,
     language_hint: str | None,
     duration: float,
     response_format: str,
@@ -124,6 +126,7 @@ async def _stream_events(
     segments = []
     words = []
     texts: list[str] = []
+    token_count = 0
     try:
         worker = loop.run_in_executor(None, produce)
         seg_id = 0
@@ -139,14 +142,19 @@ async def _stream_events(
             segments.append(segment)
             words.extend(seg_words)
             texts.append(segment.text)
+            token_count += len(item.tokens)
             yield sse_event(delta_event(segment.text + " "))
         await worker  # surface any exception raised inside the producer thread
         transcript = Transcript(
             text=" ".join(texts), language=language_hint, duration=duration,
-            segments=segments, words=words,
+            segments=segments, words=words, token_count=token_count,
         )
+        usage = build_usage(transcript, settings, diarized=False)  # streaming never diarizes
         yield sse_event(
-            done_event(transcript, response_format=response_format, include_words=include_words)
+            done_event(
+                transcript, response_format=response_format,
+                include_words=include_words, usage=usage,
+            )
         )
         infer_ms = int((time.monotonic() - infer_start) * 1000)
         logger.info(
@@ -322,7 +330,7 @@ def create_app(
             return StreamingResponse(
                 _stream_events(
                     transcriber, gate, audio,
-                    language_hint=language_hint, duration=duration,
+                    settings=st, language_hint=language_hint, duration=duration,
                     response_format=response_format, include_words=include_words, rid=rid,
                 ),
                 media_type="text/event-stream",
@@ -355,7 +363,8 @@ def create_app(
         )
         if debug_enabled():
             logger.debug("transcript text=%r", transcript.text, extra=log)
-        rendered = render(transcript, response_format, include_words=include_words)
+        usage = build_usage(transcript, st, diarized=bool(turns))
+        rendered = render(transcript, response_format, include_words=include_words, usage=usage)
         return Response(content=rendered.body, media_type=rendered.media_type)
 
     return app

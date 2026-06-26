@@ -84,6 +84,13 @@ All settings are environment variables prefixed `PARASCRIBE_` (see `.env.example
 | `DIARIZATION_MODEL` | `pyannote/speaker-diarization-3.1` | pyannote pipeline (gated model). |
 | `DIARIZATION_DEVICE` | (follow ASR) | `cuda`/`cpu`. Use `cpu` to avoid VRAM contention with ASR on small cards. |
 | `HF_TOKEN` / `HF_TOKEN_FILE` | (none) | HuggingFace token for the one-time gated diarization-model download. |
+| `AUDIO_INPUT_USAGE_UNIT` | `file_duration` | Unit for the audio-input component: `token` \| `word` \| `segment` \| `char` \| `file_duration`. See [Token costs](#token-costs). |
+| `AUDIO_INPUT_USAGE_MULTIPLIER` | `10.0` | Audio-input rate. Default `duration * 10` mirrors OpenAI (~10 audio tokens/sec). `0` disables it. |
+| `AUDIO_INPUT_USAGE_FIELD` | `input_tokens` | Which usage field audio input feeds: `input_tokens` (OpenAI parity) or `output_tokens` (one combined count). |
+| `TRANSCRIPTION_USAGE_UNIT` | `token` | Unit for the transcription component: `token` (ASR subword) \| `word` \| `segment` \| `char` \| `file_duration`. |
+| `TRANSCRIPTION_USAGE_MULTIPLIER` | `1.0` | Multiplier on the transcription unit count (fractions allowed). |
+| `DIARIZATION_USAGE_UNIT` | `token` | Unit for the diarization component (added to `output_tokens` only when diarization ran). |
+| `DIARIZATION_USAGE_MULTIPLIER` | `5.0` | Diarization multiplier; default bills a diarized request's output ~6x a plain one. |
 | `LOG_LEVEL` | `INFO` | Operational verbosity (content-free): `DEBUG`/`INFO`/`WARNING`/`ERROR`. |
 | `DEBUG_LOGGING` | `false` | Forces `DEBUG` and logs transcript content. WARNING: exposes content. |
 
@@ -136,6 +143,46 @@ with `srt`/`vtt`/`text` is ignored (logged) and returns the normal response.
 If transcription fails mid-stream, the SSE stream ends **without** a
 `transcript.text.done` event (the server logs the error); a client should treat a
 stream that never delivers the terminal `done` event as a failed transcription.
+
+### Token costs
+
+`json` and `verbose_json` responses (and the streaming `transcript.text.done`
+event) include an OpenAI `tokens`-style `usage` object so a LiteLLM gateway in
+front can track spend. Without it, LiteLLM logs **0 tokens** for every request.
+
+```json
+"usage": { "type": "tokens", "input_tokens": 36000, "output_tokens": 1342, "total_tokens": 37342 }
+```
+
+Parakeet doesn't charge by token, so you decide how the numbers are counted. Three
+parts add up, each as `round(count(unit) * multiplier)`:
+
+| Part | Default | Counts toward |
+| --- | --- | --- |
+| Audio input | `file_duration * 10` (~10 per second) | `input_tokens` |
+| Transcription | `token * 1` (actual words recognized) | `output_tokens` |
+| Diarization (only when used) | `token * 5` | `output_tokens` |
+
+You can count by `token`, `word`, `segment`, `char`, or `file_duration`. Every unit
+is **repeatable**: the same file always produces the same number. Multipliers can be
+fractions. Set the per-token price on the LiteLLM side with `input_cost_per_token`
+and `output_cost_per_token`.
+
+**Choose how to charge.** The defaults match what OpenAI does: bill the audio
+by its length (~10 tokens/sec, silence and all, like `gpt-4o-transcribe`) plus the
+text it produced. To instead charge for **work actually done**, remember the model
+only runs on speech, not silence, so a `token` or `word` count follows real GPU use.
+Set `AUDIO_INPUT_USAGE_MULTIPLIER=0` to drop the length-based charge; quiet files
+then cost almost nothing.
+
+**Diarization** runs on the CPU and costs much more than transcription. The default
+`DIARIZATION_USAGE_MULTIPLIER=5.0` makes a request with diarization bill about 6x
+the `output_tokens` of one without (`*1` for transcription, `*5` for diarization),
+roughly matching ~90s of GPU against ~1h of CPU on a 2-hour file. Lower it (toward
+~2) once diarization runs on the GPU. `SPEC.md` shows the full math.
+
+To simplify, set `AUDIO_INPUT_USAGE_FIELD=output_tokens` and everything adds
+into `output_tokens`, leaving `input_tokens` at 0.
 
 ### Diarization (optional)
 

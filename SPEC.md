@@ -215,9 +215,13 @@ Params (OpenAI-compatible):
   "segments": [
     { "id": 0, "start": 0.00, "end": 4.20, "text": "...", "speaker": null, "avg_logprob": -0.12 }
   ],
-  "words": [ { "word": "...", "start": 0.00, "end": 0.32 } ]
+  "words": [ { "word": "...", "start": 0.00, "end": 0.32 } ],
+  "usage": { "type": "tokens", "input_tokens": 36000, "output_tokens": 1342, "total_tokens": 37342 }
 }
 ```
+- `usage` is present on the `json` and `verbose_json` bodies (and the streaming
+  `transcript.text.done` event); see **Usage / billing** below. `text`/`srt`/`vtt`
+  have nowhere to carry it and omit it.
 - Populate only fields actually available from `onnx-asr`. Each segment carries
   `avg_logprob` (the mean of its token log-probabilities, Whisper/OpenAI-style raw
   log-prob — not exponentiated). Whisper-only fields not produced here (`seek`,
@@ -226,6 +230,44 @@ Params (OpenAI-compatible):
   diarization is requested, otherwise `null`. Matches OpenAI's emerging
   `diarized_json` shape.
 - `srt`/`vtt` are formatted from the same offset-corrected segments.
+
+### Usage / billing
+
+Responses report an OpenAI `tokens`-type `usage` object so a fronting LiteLLM
+gateway can track spend (without it LiteLLM records 0 tokens). Parakeet is not a
+token-billed model, so the counts are configurable rather than fixed. Three
+components each contribute `round(count(unit) * multiplier)`:
+
+- **Audio input** (`audio_input_usage_*`) → its configurable `field` (default
+  `input_tokens`). Default `file_duration * 10` mirrors OpenAI's audio-token
+  accounting (`gpt-4o-transcribe` bills ~10 audio tokens/sec of *duration*). Unlike
+  the ASR path this is **not** speech-gated: it bills silence too, matching OpenAI.
+  Set the multiplier to 0 to disable, or `field=output_tokens` to fold it into a
+  single combined count.
+- **Transcription** (`transcription_usage_*`) → `output_tokens`. Always applied.
+- **Diarization** (`diarization_usage_*`) → `output_tokens`, only when diarization
+  actually ran for the request.
+
+`unit` is one of `token` (the real ASR subword count), `word`, `segment`, `char`,
+or `file_duration` (seconds). All are **deterministic**: the same input always
+bills the same, so responses stay reproducible. Multipliers accept fractions.
+
+Two billing philosophies the config spans:
+
+- **OpenAI parity (default):** audio `input_tokens = duration * 10`, plus text
+  `output_tokens` from the real subword count. Familiar numbers; over-bills silence
+  exactly as OpenAI does.
+- **Cost-faithful:** the ASR path is VAD-gated, so real GPU cost tracks *speech*,
+  not wall-clock duration. Disable audio input (`multiplier=0`) and bill by
+  `token`/`word`; silence becomes nearly free, matching real compute.
+
+Diarization runs on the whole file but its dominant (embeddings) stage is
+speech-gated too, so it is billed as a multiple of the same transcript count. The
+default `diarization_usage_multiplier=5.0` (with `unit=token`) encodes the derived
+CPU-bound cost: a diarized request's `output_tokens` is ~6x a transcription-only
+one (transcription `* 1` + diarization `* 5`), reflecting ~90s GPU vs ~1h CPU
+weighted at a ~8x GPU:CPU per-second cost. Re-derive the multiplier if diarization
+moves to GPU (it drops toward ~2).
 
 ### `GET /health`
 

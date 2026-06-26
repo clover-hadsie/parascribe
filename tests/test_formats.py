@@ -6,7 +6,13 @@ import json
 
 import pytest
 
-from parascribe.formats import render, to_srt, to_vtt, verbose_json_body
+from parascribe.formats import (
+    done_event,
+    render,
+    to_srt,
+    to_vtt,
+    verbose_json_body,
+)
 from parascribe.stitch import Segment, Transcript, Word
 
 
@@ -20,7 +26,18 @@ def transcript() -> Transcript:
             Segment(id=0, start=0.0, end=1.5, text="Hello world.", speaker=None, avg_logprob=-0.1)
         ],
         words=[Word("Hello", 0.0, 0.5), Word("world.", 0.5, 1.5)],
+        token_count=4,
     )
+
+
+# A representative usage object; render/done_event treat it as an opaque dict, so
+# its exact derivation (tested in test_usage.py) is irrelevant here.
+_USAGE: dict[str, object] = {
+    "type": "tokens",
+    "input_tokens": 30,
+    "output_tokens": 4,
+    "total_tokens": 34,
+}
 
 
 class TestRenderJson:
@@ -68,6 +85,31 @@ class TestSubtitles:
         out = to_vtt(transcript)
         assert out.startswith("WEBVTT")
         assert "00:00:00.000 --> 00:00:01.500" in out
+
+
+class TestUsageInRender:
+    def test_json_carries_usage(self, transcript):
+        r = render(transcript, "json", include_words=False, usage=_USAGE)
+        assert json.loads(r.body)["usage"] == _USAGE
+
+    def test_verbose_json_carries_usage(self, transcript):
+        r = render(transcript, "verbose_json", include_words=False, usage=_USAGE)
+        assert json.loads(r.body)["usage"] == _USAGE
+
+    def test_json_omits_usage_when_none(self, transcript):
+        r = render(transcript, "json", include_words=False)
+        assert "usage" not in json.loads(r.body)
+
+    def test_text_format_ignores_usage(self, transcript):
+        # Plain text has nowhere to carry usage; it must not corrupt the body.
+        r = render(transcript, "text", include_words=False, usage=_USAGE)
+        assert r.body == "Hello world."
+
+    def test_done_event_carries_usage(self, transcript):
+        event = done_event(
+            transcript, response_format="verbose_json", include_words=False, usage=_USAGE,
+        )
+        assert event["usage"] == _USAGE
 
 
 def test_unsupported_format_raises():

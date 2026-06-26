@@ -9,6 +9,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ExecutionProvider = Literal["cuda", "cpu", "coreml"]
 DiarizationDevice = Literal["cuda", "cpu"]
+# What one reported "token" counts. All units are deterministic per input.
+UsageUnit = Literal["token", "word", "segment", "char", "file_duration"]
+UsageField = Literal["input_tokens", "output_tokens"]
 
 
 class Settings(BaseSettings):
@@ -53,6 +56,18 @@ class Settings(BaseSettings):
     diarization_device: DiarizationDevice | None = None
     hf_token: str | None = None
     hf_token_file: Path | None = None
+
+    # Usage / billing (reported as OpenAI 'tokens' usage; see README "Token costs").
+    # Each component bills round(count(unit) * multiplier). Audio-input defaults to
+    # duration * 10 -> input_tokens (OpenAI parity; multiplier 0 disables it).
+    audio_input_usage_unit: UsageUnit = "file_duration"
+    audio_input_usage_multiplier: float = 10.0
+    audio_input_usage_field: UsageField = "input_tokens"
+    transcription_usage_unit: UsageUnit = "token"
+    transcription_usage_multiplier: float = 1.0
+    # Diarization adds to output_tokens only when it ran; default ~5x transcription.
+    diarization_usage_unit: UsageUnit = "token"
+    diarization_usage_multiplier: float = 5.0
 
     # Language / logging
     default_language: str | None = None
