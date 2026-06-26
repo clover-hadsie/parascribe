@@ -104,10 +104,15 @@ class TestAuth:
 
 
 class TestResponseFormats:
-    def test_json_default_returns_text_only(self, tmp_path, wav):
+    def test_json_returns_text_and_usage(self, tmp_path, wav):
         with make_client(tmp_path) as client:
             r = post(client, wav)
-            assert r.json() == {"text": "The first part. The second part."}
+            body = r.json()
+            assert body["text"] == "The first part. The second part."
+            # 2 canned segments * 4 subword tokens, billed 1:1, no diarization.
+            assert body["usage"]["output_tokens"] == 8
+            # Audio input: 1s wav * 10 (OpenAI-parity default) -> input_tokens.
+            assert body["usage"]["input_tokens"] == 10
 
     def test_verbose_json_has_segments_without_granularities(self, tmp_path, wav):
         # Invariant #1: segments + real times without timestamp_granularities[].
@@ -177,6 +182,12 @@ class TestStreaming:
             done = [e for e in sse_events(r.text) if e["type"] == "transcript.text.done"]
             assert done[0]["segments"][1]["start"] == 4.0
 
+    def test_stream_done_carries_usage(self, tmp_path, wav):
+        with make_client(tmp_path) as client:
+            r = post(client, wav, stream="true")
+            done = [e for e in sse_events(r.text) if e["type"] == "transcript.text.done"]
+            assert done[0]["usage"]["output_tokens"] == 8
+
     def test_stream_ignored_for_srt_falls_back(self, tmp_path, wav):
         # Decision #6: stream=true with a non-streamable format returns non-streamed.
         with make_client(tmp_path) as client:
@@ -206,6 +217,12 @@ class TestDiarization:
             segs = r.json()["segments"]
             assert segs[0]["speaker"] == "SPEAKER_00"
             assert segs[1]["speaker"] == "SPEAKER_01"
+
+    def test_diarized_request_bills_extra_usage(self, tmp_path, wav):
+        # diarized=bool(turns) wiring: 8 transcription tokens + 8 * 5 diarization.
+        with make_client(tmp_path, diarizer=FakeDiarizer()) as client:
+            r = post(client, wav, response_format="verbose_json", diarization="true")
+            assert r.json()["usage"]["output_tokens"] == 8 + 8 * 5
 
     def test_words_get_speaker_with_word_granularity(self, tmp_path, wav):
         with make_client(tmp_path, diarizer=FakeDiarizer()) as client:
