@@ -129,6 +129,12 @@ see open question).
   transcriber is passed into `_stream_events` (unchanged signature).
 - `/health`: report `mode` (`single`/`multi`), the configured allow-list, and the
   currently-resident model ids, in addition to the existing default-model fields.
+- `GET /v1/models`: OpenAI-compatible model list returning the allow-list
+  (`registry.allowed_ids()`) as `{"object": "list", "data": [{"id", "object":
+  "model", "created", "owned_by": "parascribe"}, ...]}`. Bearer-auth required (it
+  exposes configuration, and matches OpenAI behavior), unlike the open `/health`
+  liveness probe. Advertises exactly the ids the transcription route accepts, so a
+  listed model never 400s. Single mode lists the one configured model.
 
 ### Invariant #6 reword (CLAUDE.md + SPEC.md)
 Current: "One model, one inference at a time. Single model loaded once at startup."
@@ -207,6 +213,9 @@ GPU fail-loud check is preserved regardless of mode.
 - [ ] Eviction drops all references to the Transcriber so the model is no longer
       reported as resident.
 - [ ] `/health` reports the mode, the allow-list, and the resident model ids.
+- [ ] `GET /v1/models` returns the allow-list in OpenAI list shape; single mode
+      lists the one configured model; the call requires bearer auth (401 without);
+      every advertised id is accepted by the transcription route.
 - [ ] Single-flight serialization, response formats, streaming, and forensic
       logging are unchanged by this feature.
 
