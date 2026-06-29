@@ -204,6 +204,35 @@ class TestMultiModel:
             assert post(client, wav, model="whatever").status_code == 200
 
 
+class TestListModels:
+    AUTH = {"Authorization": "Bearer secret"}
+
+    def test_lists_allow_list_in_openai_shape(self, tmp_path):
+        with make_multi_client(tmp_path, models=["m1", "m2"]) as client:
+            body = client.get("/v1/models", headers=self.AUTH).json()
+            assert body["object"] == "list"
+            ids = {m["id"] for m in body["data"]}
+            assert {"m1", "m2"} <= ids
+            assert all(m["object"] == "model" for m in body["data"])
+
+    def test_single_mode_lists_the_one_model(self, tmp_path):
+        with make_client(tmp_path) as client:
+            body = client.get("/v1/models", headers=self.AUTH).json()
+            ids = [m["id"] for m in body["data"]]
+            assert ids == ["istupakov/parakeet-tdt-0.6b-v3-onnx"]
+
+    def test_requires_auth(self, tmp_path):
+        with make_client(tmp_path) as client:
+            assert client.get("/v1/models").status_code == 401
+
+    def test_advertised_model_is_accepted_by_transcription(self, tmp_path, wav):
+        # What /v1/models lists must not 400 at the transcription route.
+        with make_multi_client(tmp_path, models=["m1", "m2"]) as client:
+            listed = client.get("/v1/models", headers=self.AUTH).json()["data"]
+            for model in (m["id"] for m in listed):
+                assert post(client, wav, model=model).status_code == 200
+
+
 class TestStreaming:
     def test_stream_json_emits_deltas_then_done(self, tmp_path, wav):
         with make_client(tmp_path) as client:

@@ -45,6 +45,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _UPLOAD_CHUNK = 1024 * 1024
+# Stable "created" timestamp for the OpenAI-compatible model list (clients expect
+# the field). Captured at import; it reflects server start, not model age.
+_MODELS_CREATED = int(time.time())
 
 
 class QueueFullError(RuntimeError):
@@ -251,6 +254,34 @@ def create_app(
                 "mode": "multi" if reg.multi else "single",
                 "models": reg.allowed_ids(),
                 "loaded": reg.loaded_ids(),
+            }
+        )
+
+    @app.get("/v1/models")
+    async def list_models(
+        request: Request,
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> JSONResponse:
+        """OpenAI-compatible model list: the configured allow-list.
+
+        Advertises exactly the ids the transcription route accepts, so a model
+        listed here will not 400. Single mode lists the one configured model.
+        """
+        st: Settings = request.app.state.settings
+        reg: ModelRegistry = request.app.state.registry
+        check_bearer(st.resolved_api_key(), authorization)
+        return JSONResponse(
+            {
+                "object": "list",
+                "data": [
+                    {
+                        "id": model_id,
+                        "object": "model",
+                        "created": _MODELS_CREATED,
+                        "owned_by": "parascribe",
+                    }
+                    for model_id in reg.allowed_ids()
+                ],
             }
         )
 
