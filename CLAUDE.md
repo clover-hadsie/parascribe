@@ -34,7 +34,7 @@ than guessing. After behavior-changing work, note if `SPEC.md` needs updating.
 
 ## Conventions
 
-- Python 3.12, **venv + pip** (not uv). `requirements.txt` with pinned
+- Python 3.11+, **venv + pip** (not uv). `requirements.txt` with pinned
   `onnxruntime-gpu` (see SPEC §8). `requirements-dev.txt` for test/lint tooling.
 - FastAPI + uvicorn. Config via pydantic-settings (env vars).
 - Lint/type: **ruff** + **mypy**. Tests: **pytest**, in `tests/` mirroring `src/`.

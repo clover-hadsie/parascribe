@@ -44,7 +44,7 @@ multi-model; see `specs/multi-model-registry/spec.md`).
 
 ## 4. Tech stack
 
-- Python 3.12, **FastAPI** + **uvicorn**.
+- Python 3.11+, **FastAPI** + **uvicorn**.
 - **venv + pip** for environment and packaging (not uv). Pinned deps in
   `requirements.txt`; dev/test tooling in `requirements-dev.txt`.
 - **`onnx-asr`** for inference, VAD, and timestamps. Requires `huggingface_hub`

@@ -18,7 +18,7 @@ with word- and segment-level timestamps, running on your own GPU.
 
 ## Requirements
 
-- Python 3.12
+- Python 3.11 or newer
 - `ffmpeg` and `ffprobe` on `PATH`
 - For GPU: an NVIDIA card + CUDA runtime compatible with the pinned
   `onnxruntime-gpu` (see [Pascal / ONNX Runtime](#pascal--onnx-runtime-pin)).
@@ -29,7 +29,7 @@ parascribe uses a plain venv + pip (not uv). Pick the requirements file for your
 target:
 
 ```bash
-python3.12 -m venv .venv
+python3 -m venv .venv   # Python 3.11+
 
 # Deployment (NVIDIA GPU):
 .venv/bin/pip install -r requirements-gpu.txt
