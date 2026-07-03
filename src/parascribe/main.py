@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -48,6 +49,8 @@ _UPLOAD_CHUNK = 1024 * 1024
 # Stable "created" timestamp for the OpenAI-compatible model list (clients expect
 # the field). Captured at import; it reflects server start, not model age.
 _MODELS_CREATED = int(time.time())
+# End-of-stream marker the producer thread puts on the segment queue.
+_SENTINEL = object()
 
 
 class QueueFullError(RuntimeError):
@@ -66,40 +69,86 @@ class InferenceGate:
         self._sem = asyncio.Semaphore(1)
         self._capacity = max(1, capacity)
         self._admitted = 0
-        self._guard = asyncio.Lock()
 
     async def acquire(self) -> None:
-        """Admit this request (raising QueueFullError if saturated) then serialize."""
-        async with self._guard:
-            if self._admitted >= self._capacity:
-                raise QueueFullError
-            self._admitted += 1
+        """Admit this request (raising QueueFullError if saturated) then serialize.
+
+        The admission check-and-increment has no await between them, so it is
+        atomic on the event loop without a lock.
+        """
+        if self._admitted >= self._capacity:
+            raise QueueFullError
+        self._admitted += 1
         try:
             await self._sem.acquire()
         except BaseException:
             # Cancelled/interrupted while waiting: give the admitted slot back
             # before propagating so the capacity counter stays accurate.
-            async with self._guard:
-                self._admitted -= 1
+            self._admitted -= 1
             raise
 
-    async def release(self) -> None:
+    def release(self) -> None:
+        """Free the in-flight slot. Sync so future callbacks can call it."""
         self._sem.release()
-        async with self._guard:
-            self._admitted -= 1
+        self._admitted -= 1
 
     async def __aenter__(self) -> InferenceGate:
         await self.acquire()
         return self
 
     async def __aexit__(self, *exc_info: object) -> None:
-        await self.release()
+        self.release()
 
 
-async def _stream_events(
+def _start_stream_producer(
     transcriber: Transcriber,
     gate: InferenceGate,
     audio: Audio,
+    queue: asyncio.Queue[RawSegment | object],
+    stop: threading.Event,
+    *,
+    language_hint: str | None,
+    rid: str,
+) -> asyncio.Future[None]:
+    """Run transcription in a worker thread feeding ``queue``; owns the gate.
+
+    The gate (already acquired by the route) is released by a done-callback when
+    the thread has fully finished, never earlier: a client disconnect must not
+    let a second request start a forward pass while this one is still on the
+    GPU. ``stop`` asks the producer to quit at the next segment boundary. The
+    consuming generator may never run at all (client gone before the response
+    body streams), so gate release cannot live there.
+    """
+    loop = asyncio.get_running_loop()
+
+    def produce() -> None:
+        try:
+            for raw in transcriber.transcribe(audio, language=language_hint):
+                if stop.is_set():
+                    break
+                loop.call_soon_threadsafe(queue.put_nowait, raw)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
+
+    worker = loop.run_in_executor(None, produce)
+
+    def _on_done(fut: asyncio.Future[None]) -> None:
+        gate.release()
+        if not fut.cancelled() and fut.exception() is not None:
+            exc = fut.exception()
+            logger.error(
+                "stream inference failed: %s: %s",
+                type(exc).__name__, exc, extra={"rid": rid},
+            )
+
+    worker.add_done_callback(_on_done)
+    return worker
+
+
+async def _stream_events(
+    worker: asyncio.Future[None],
+    queue: asyncio.Queue[RawSegment | object],
+    stop: threading.Event,
     *,
     settings: Settings,
     language_hint: str | None,
@@ -108,36 +157,23 @@ async def _stream_events(
     include_words: bool,
     rid: str,
 ) -> AsyncIterator[str]:
-    """Bridge the sync VAD-segment generator to SSE events as segments finalize.
+    """Bridge the producer's segment queue to SSE events as segments finalize.
 
-    A worker thread iterates the (blocking) transcription generator and feeds an
-    asyncio.Queue; we emit a delta per segment, then a terminal done event. The
-    gate (acquired by the caller) is released when the stream finishes or the
-    client disconnects (StreamingResponse closes this generator).
+    Emits a delta per segment, then a terminal done event. On client disconnect
+    (StreamingResponse closes this generator) the finally asks the producer to
+    stop; releasing the gate is the producer's job, not this generator's.
     """
-    loop = asyncio.get_running_loop()
-    queue: asyncio.Queue[RawSegment | object] = asyncio.Queue()
-    sentinel = object()
     log = {"rid": rid}
     infer_start = time.monotonic()
-
-    def produce() -> None:
-        try:
-            for raw in transcriber.transcribe(audio, language=language_hint):
-                loop.call_soon_threadsafe(queue.put_nowait, raw)
-        finally:
-            loop.call_soon_threadsafe(queue.put_nowait, sentinel)
-
     segments = []
     words = []
     texts: list[str] = []
     token_count = 0
     try:
-        worker = loop.run_in_executor(None, produce)
         seg_id = 0
         while True:
             item = await queue.get()
-            if item is sentinel:
+            if item is _SENTINEL:
                 break
             assert isinstance(item, RawSegment)
             if not item.text.strip():
@@ -169,7 +205,7 @@ async def _stream_events(
         if debug_enabled():
             logger.debug("transcript text=%r", transcript.text, extra=log)
     finally:
-        await gate.release()
+        stop.set()
 
 
 async def _save_upload(
@@ -418,13 +454,19 @@ def create_app(
         try:
             transcriber = await run_in_threadpool(lambda: registry.get(model_id))
         except BaseException:
-            await gate.release()
+            gate.release()
             raise
 
         if do_stream:
+            queue: asyncio.Queue[RawSegment | object] = asyncio.Queue()
+            stop = threading.Event()
+            worker = _start_stream_producer(
+                transcriber, gate, audio, queue, stop,
+                language_hint=language_hint, rid=rid,
+            )
             return StreamingResponse(
                 _stream_events(
-                    transcriber, gate, audio,
+                    worker, queue, stop,
                     settings=st, language_hint=language_hint, duration=duration,
                     response_format=response_format, include_words=include_words, rid=rid,
                 ),
@@ -444,7 +486,7 @@ def create_app(
                     lambda: diarizer.diarize(audio, num_speakers=num_speakers, rid=rid)
                 )
         finally:
-            await gate.release()
+            gate.release()
         infer_ms = int((time.monotonic() - infer_start) * 1000)
 
         transcript = assemble(raw_segments, language=language_hint, duration=duration)

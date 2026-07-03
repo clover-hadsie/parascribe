@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -13,7 +15,13 @@ from fastapi.testclient import TestClient
 from parascribe.align import SpeakerTurn
 from parascribe.asr import RawSegment
 from parascribe.config import Settings
-from parascribe.main import InferenceGate, QueueFullError, create_app
+from parascribe.main import (
+    InferenceGate,
+    QueueFullError,
+    _start_stream_producer,
+    _stream_events,
+    create_app,
+)
 from parascribe.registry import ModelRegistry
 
 _TOK = [" The", " second", " part", "."]
@@ -401,3 +409,80 @@ class TestInferenceGate:
         for i in range(0, len(order), 2):
             assert order[i][0] == "start" and order[i + 1][0] == "end"
             assert order[i][1] == order[i + 1][1]
+
+
+class SlowSecondSegment:
+    """Transcriber whose second forward pass blocks until ``unblock`` is set."""
+
+    device = "cpu"
+    provider_active = True
+
+    def __init__(self) -> None:
+        self.unblock = threading.Event()
+
+    def transcribe(self, audio, *, language=None):
+        yield CANNED[0]
+        assert self.unblock.wait(timeout=5)
+        yield CANNED[1]
+
+
+class TestStreamingGate:
+    """The producer thread owns the gate; the SSE generator only consumes."""
+
+    SETTINGS = {"execution_provider": "cpu", "api_key": "k"}
+
+    def _start(self, transcriber, gate, rid="t"):
+        queue: asyncio.Queue = asyncio.Queue()
+        stop = threading.Event()
+        worker = _start_stream_producer(
+            transcriber, gate, None, queue, stop, language_hint=None, rid=rid
+        )
+        return worker, queue, stop
+
+    async def test_disconnect_holds_gate_until_forward_pass_ends(self):
+        gate = InferenceGate(capacity=4)
+        await gate.acquire()
+        transcriber = SlowSecondSegment()
+        worker, queue, stop = self._start(transcriber, gate)
+        gen = _stream_events(
+            worker, queue, stop,
+            settings=Settings(**self.SETTINGS), language_hint=None, duration=6.0,
+            response_format="json", include_words=False, rid="t",
+        )
+        assert (await gen.__anext__()).startswith("data: ")
+        await gen.aclose()  # client disconnects mid-stream
+        assert stop.is_set()
+        # The fake forward pass is still running: the gate must still be held.
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(gate.acquire(), timeout=0.2)
+        transcriber.unblock.set()
+        # Released only once the producer thread actually finishes.
+        await asyncio.wait_for(gate.acquire(), timeout=2)
+        gate.release()
+
+    async def test_gate_released_when_stream_is_never_consumed(self):
+        # A client can vanish before Starlette ever iterates the generator; the
+        # done-callback must release the gate regardless.
+        gate = InferenceGate(capacity=4)
+        await gate.acquire()
+        worker, _queue, _stop = self._start(FakeTranscriber(), gate)
+        await worker
+        await asyncio.wait_for(gate.acquire(), timeout=2)
+        gate.release()
+
+    async def test_producer_error_released_and_logged_with_rid(self, caplog):
+        class Boom:
+            def transcribe(self, audio, *, language=None):
+                raise RuntimeError("onnxruntime failure")
+                yield  # pragma: no cover
+
+        gate = InferenceGate(capacity=4)
+        await gate.acquire()
+        with caplog.at_level(logging.ERROR, logger="parascribe.main"):
+            worker, _queue, _stop = self._start(Boom(), gate, rid="rid1")
+            with pytest.raises(RuntimeError):
+                await worker
+            await asyncio.wait_for(gate.acquire(), timeout=2)
+            gate.release()
+        errors = [r for r in caplog.records if "stream inference failed" in r.getMessage()]
+        assert errors and errors[0].rid == "rid1"
