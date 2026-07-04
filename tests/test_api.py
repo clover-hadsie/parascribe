@@ -127,6 +127,45 @@ class TestAuth:
             assert post(client, wav).status_code == 200
 
 
+class TestErrorEnvelope:
+    """Errors must use the OpenAI {"error": {...}} shape, not FastAPI's detail."""
+
+    def test_401_uses_openai_envelope(self, tmp_path, wav):
+        with make_client(tmp_path) as client:
+            r = post(client, wav, key="wrong")
+            err = r.json()["error"]
+            assert err["type"] == "invalid_request_error"
+            assert err["code"] == "invalid_api_key"
+            assert r.headers["www-authenticate"] == "Bearer"
+
+    def test_bad_response_format_is_400_envelope(self, tmp_path, wav):
+        with make_client(tmp_path) as client:
+            r = post(client, wav, response_format="nope")
+            assert r.status_code == 400
+            assert r.json()["error"]["type"] == "invalid_request_error"
+
+    def test_missing_model_param_is_400_not_422(self, tmp_path, wav):
+        with make_client(tmp_path) as client:
+            with wav.open("rb") as fh:
+                r = client.post(
+                    "/v1/audio/transcriptions",
+                    files={"file": ("clip.wav", fh, "audio/wav")},
+                    headers={"Authorization": "Bearer secret"},
+                )
+            assert r.status_code == 400
+            assert r.json()["error"]["param"] == "model"
+
+    def test_missing_file_param_is_400_not_422(self, tmp_path):
+        with make_client(tmp_path) as client:
+            r = client.post(
+                "/v1/audio/transcriptions",
+                data={"model": "parascribe"},
+                headers={"Authorization": "Bearer secret"},
+            )
+            assert r.status_code == 400
+            assert r.json()["error"]["param"] == "file"
+
+
 class TestResponseFormats:
     def test_json_returns_text_and_usage(self, tmp_path, wav):
         with make_client(tmp_path) as client:

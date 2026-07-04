@@ -7,13 +7,15 @@ import logging
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile, status
+from fastapi.exceptions import RequestValidationError
 from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from parascribe import __version__
@@ -208,6 +210,31 @@ async def _stream_events(
         stop.set()
 
 
+def _error_response(
+    status_code: int,
+    message: str,
+    *,
+    param: str | None = None,
+    code: str | None = None,
+    headers: Mapping[str, str] | None = None,
+) -> JSONResponse:
+    """OpenAI-style error envelope: {"error": {message, type, param, code}}."""
+    if status_code == status.HTTP_401_UNAUTHORIZED:
+        code = code or "invalid_api_key"
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "error": {
+                "message": message,
+                "type": "invalid_request_error" if status_code < 500 else "server_error",
+                "param": param,
+                "code": code,
+            }
+        },
+        headers=headers,
+    )
+
+
 async def _save_upload(
     upload: UploadFile, dest: Path, max_bytes: int, *, fetch_enabled: bool
 ) -> str | None:
@@ -277,6 +304,26 @@ def create_app(
         yield
 
     app = FastAPI(title="parascribe", version=__version__, lifespan=lifespan)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_exception_as_openai(
+        request: Request, exc: StarletteHTTPException
+    ) -> JSONResponse:
+        """Render HTTPExceptions in the OpenAI error envelope (invariant #5)."""
+        return _error_response(exc.status_code, str(exc.detail), headers=exc.headers)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error_as_openai(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        """Missing/invalid request params: OpenAI returns 400, not FastAPI's 422."""
+        first = exc.errors()[0] if exc.errors() else {}
+        loc = first.get("loc", ())
+        param = str(loc[-1]) if loc else None
+        message = first.get("msg", "Invalid request.")
+        if param:
+            message = f"{message} (param: {param})"
+        return _error_response(status.HTTP_400_BAD_REQUEST, message, param=param)
 
     @app.get("/health")
     async def health(request: Request) -> JSONResponse:
