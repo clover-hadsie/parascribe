@@ -12,7 +12,17 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile, status
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.exceptions import RequestValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -27,10 +37,12 @@ from parascribe.diarize import Diarizer
 from parascribe.fetch import FetchError, FetchTooLargeError, fetch_to_file, looks_like_url
 from parascribe.formats import (
     ALLOWED_FORMATS,
+    ASR_OUTPUTS,
     STREAMABLE_FORMATS,
     delta_event,
     done_event,
     render,
+    render_asr,
     sse_event,
 )
 from parascribe.log import configure_logging, debug_enabled
@@ -264,6 +276,95 @@ async def _save_upload(
     return None
 
 
+def _check_speaker_counts(
+    num_speakers: int | None, min_speakers: int | None, max_speakers: int | None
+) -> None:
+    """400 unless every provided speaker-count hint is a positive int and min <= max."""
+    for name, value in (
+        ("num_speakers", num_speakers),
+        ("min_speakers", min_speakers),
+        ("max_speakers", max_speakers),
+    ):
+        if value is not None and value < 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{name} must be a positive integer.",
+            )
+    if min_speakers is not None and max_speakers is not None and min_speakers > max_speakers:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="min_speakers must not exceed max_speakers.",
+        )
+
+
+async def _ingest_upload(
+    upload: UploadFile, st: Settings, log: dict[str, str]
+) -> tuple[Audio, float]:
+    """Save (or fetch) and decode the upload; return (pcm, duration)."""
+    rid = log["rid"]
+    tmp_path = st.work_dir / f"upload-{rid}"
+    # Decode fully into memory, then drop the upload.
+    max_bytes = st.max_upload_mb * 1024 * 1024
+    decode_start = time.monotonic()
+    try:
+        source_url = await _save_upload(
+            upload, tmp_path, max_bytes, fetch_enabled=st.enable_url_fetch
+        )
+        if source_url is not None:
+            logger.debug("input is a remote URL; fetching", extra=log)
+            await run_in_threadpool(
+                fetch_to_file, source_url, tmp_path,
+                max_bytes=max_bytes, timeout=st.url_fetch_timeout_s,
+                allowlist=st.url_fetch_allowlist,
+            )
+        if not st.enable_video and await run_in_threadpool(
+            lambda: contains_video(tmp_path, timeout_s=st.decode_timeout_s)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Video input is disabled (set enable_video=true).",
+            )
+        audio = await run_in_threadpool(
+            lambda: decode_to_pcm(tmp_path, timeout_s=st.decode_timeout_s)
+        )
+    except FetchTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except (FetchError, DecodeError) as exc:
+        logger.warning("input failed: %s", exc, extra=log)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    duration = duration_seconds(audio)
+    decode_ms = int((time.monotonic() - decode_start) * 1000)
+    logger.debug("decoded %.2fs audio in %dms", duration, decode_ms, extra=log)
+    return audio, duration
+
+
+async def _admit_transcriber(
+    gate: InferenceGate, registry: ModelRegistry, model_id: str, log: dict[str, str]
+) -> Transcriber:
+    """Wait for the request's turn in an inference queue.
+
+    Returns a 503 if the queue is full.
+    """
+    try:
+        await gate.acquire()
+    except QueueFullError:
+        logger.warning("rejected: inference queue full", extra=log)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Server busy: inference queue is full.",
+        ) from None
+    try:
+        return await run_in_threadpool(lambda: registry.get(model_id))
+    except BaseException:
+        gate.release()
+        raise
+
+
 def create_app(
     settings: Settings | None = None,
     transcriber: Transcriber | None = None,
@@ -295,6 +396,11 @@ def create_app(
             Diarizer(settings) if settings.enable_diarization else None
         )
         app.state.gate = InferenceGate(settings.max_queue)
+        if settings.enable_asr_compat:
+            logger.warning(
+                "ASR compat surface (/asr) enabled: the route is UNAUTHENTICATED; "
+                "expose it only on an internal network."
+            )
         logger.info(
             "ready: model=%s provider=%s mode=%s diarization=%s max_queue=%d",
             settings.model_id, settings.execution_provider,
@@ -385,6 +491,8 @@ def create_app(
         prompt: Annotated[str | None, Form()] = None,
         diarization: Annotated[bool, Form()] = False,
         num_speakers: Annotated[int | None, Form()] = None,
+        min_speakers: Annotated[int | None, Form()] = None,
+        max_speakers: Annotated[int | None, Form()] = None,
         # OpenAI sends `timestamp_granularities[]`; some clients send the bare key.
         # Accept both. A gateway may drop this param entirely, which is why
         # verbose_json emits segments regardless of whether it arrives.
@@ -419,11 +527,7 @@ def create_app(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Diarization is not enabled on this server.",
             )
-        if num_speakers is not None and num_speakers < 1:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="num_speakers must be a positive integer.",
-            )
+        _check_speaker_counts(num_speakers, min_speakers, max_speakers)
 
         granularities = set(timestamp_granularities_bracket or []) | set(
             timestamp_granularities or []
@@ -446,67 +550,11 @@ def create_app(
             reason = "diarization on" if diarization else f"format={response_format}"
             logger.warning("stream=true ignored (%s)", reason, extra=log)
 
-        tmp_path = st.work_dir / f"upload-{rid}"
-        # Decode fully into memory, then drop the upload immediately: streaming and
-        # non-streaming alike work from the in-memory array, so the temp file never
-        # outlives decode (keeps uploaded media off disk beyond the request).
-        max_bytes = st.max_upload_mb * 1024 * 1024
-        decode_start = time.monotonic()
-        try:
-            source_url = await _save_upload(
-                file, tmp_path, max_bytes, fetch_enabled=st.enable_url_fetch
-            )
-            if source_url is not None:
-                logger.debug("input is a remote URL; fetching", extra=log)
-                await run_in_threadpool(
-                    fetch_to_file, source_url, tmp_path,
-                    max_bytes=max_bytes, timeout=st.url_fetch_timeout_s,
-                    allowlist=st.url_fetch_allowlist,
-                )
-            if not st.enable_video and await run_in_threadpool(
-                lambda: contains_video(tmp_path, timeout_s=st.decode_timeout_s)
-            ):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Video input is disabled (set enable_video=true).",
-                )
-            audio = await run_in_threadpool(
-                lambda: decode_to_pcm(tmp_path, timeout_s=st.decode_timeout_s)
-            )
-        except FetchTooLargeError as exc:
-            raise HTTPException(status_code=413, detail=str(exc)) from exc
-        except (FetchError, DecodeError) as exc:
-            logger.warning("input failed: %s", exc, extra=log)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
-            ) from exc
-        finally:
-            tmp_path.unlink(missing_ok=True)
+        audio, duration = await _ingest_upload(file, st, log)
 
-        duration = duration_seconds(audio)
-        decode_ms = int((time.monotonic() - decode_start) * 1000)
-        logger.debug("decoded %.2fs audio in %dms", duration, decode_ms, extra=log)
-
-        try:
-            # Admit before responding so saturation returns 503 even for streaming
-            # (where the 200 headers would otherwise already be sent).
-            await gate.acquire()
-        except QueueFullError:
-            logger.warning("rejected: inference queue full", extra=log)
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Server busy: inference queue is full.",
-            ) from None
-
-        # Resolve the model under the gate: a cache hit is instant, a miss loads
-        # (and may evict another model) off the event loop. Serialized with
-        # inference so a load never races an in-flight forward pass. Release the
-        # gate if the load fails so the slot is not leaked.
-        try:
-            transcriber = await run_in_threadpool(lambda: registry.get(model_id))
-        except BaseException:
-            gate.release()
-            raise
+        # Admit before responding so saturation returns 503 even for streaming
+        # (where the 200 headers would otherwise already be sent).
+        transcriber = await _admit_transcriber(gate, registry, model_id, log)
 
         if do_stream:
             queue: asyncio.Queue[RawSegment | object] = asyncio.Queue()
@@ -534,7 +582,10 @@ def create_app(
             turns = []
             if diarization and diarizer is not None:
                 turns = await run_in_threadpool(
-                    lambda: diarizer.diarize(audio, num_speakers=num_speakers, rid=rid)
+                    lambda: diarizer.diarize(
+                        audio, num_speakers=num_speakers,
+                        min_speakers=min_speakers, max_speakers=max_speakers, rid=rid,
+                    )
                 )
         finally:
             gate.release()
@@ -554,6 +605,113 @@ def create_app(
         usage = build_usage(transcript, st, diarized=bool(turns))
         rendered = render(transcript, response_format, include_words=include_words, usage=usage)
         return Response(content=rendered.body, media_type=rendered.media_type)
+
+    if settings.enable_asr_compat:
+
+        @app.post("/asr")
+        async def asr_compat(
+            request: Request,
+            audio_file: Annotated[UploadFile, File()],
+            task: Annotated[str, Query()] = "transcribe",
+            language: Annotated[str | None, Query()] = None,
+            output: Annotated[str, Query()] = "txt",
+            diarize: Annotated[bool | None, Query()] = None,
+            enable_diarization: Annotated[bool | None, Query()] = None,
+            min_speakers: Annotated[int | None, Query()] = None,
+            max_speakers: Annotated[int | None, Query()] = None,
+            return_speaker_embeddings: Annotated[bool, Query()] = False,
+            initial_prompt: Annotated[str | None, Query()] = None,
+            hotwords: Annotated[str | None, Query()] = None,
+            encode: Annotated[bool, Query()] = True,
+            model: Annotated[str | None, Query()] = None,
+        ) -> Response:
+            st: Settings = request.app.state.settings
+            registry: ModelRegistry = request.app.state.registry
+            diarizer: Diarizer | None = request.app.state.diarizer
+            gate: InferenceGate = request.app.state.gate
+
+            if task != "transcribe":
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Unsupported task {task!r}: this server only transcribes.",
+                )
+            if output not in ASR_OUTPUTS:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Unsupported output. Allowed: {list(ASR_OUTPUTS)}",
+                )
+            if return_speaker_embeddings:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Speaker embeddings are not supported by this server; "
+                    "disable them in the client and retry.",
+                )
+            do_diarize = (
+                diarize if diarize is not None
+                else enable_diarization if enable_diarization is not None
+                else st.asr_compat_diarize_default
+            )
+            if do_diarize and diarizer is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Diarization is not enabled on this server: enable "
+                    "PARASCRIBE_ENABLE_DIARIZATION, or send diarize=false.",
+                )
+            _check_speaker_counts(None, min_speakers, max_speakers)
+            try:
+                model_id = registry.resolve(model)
+            except UnknownModelError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+                ) from exc
+
+            language_hint = language or st.default_language
+            rid = uuid.uuid4().hex[:8]
+            log = {"rid": rid}
+            logger.info(
+                "recv(asr): output=%s diarize=%s lang=%s",
+                output, do_diarize, language_hint or "-", extra=log,
+            )
+            if initial_prompt or hotwords:
+                logger.debug(
+                    "ignoring unsupported params (initial_prompt/hotwords)", extra=log
+                )
+
+            audio, duration = await _ingest_upload(audio_file, st, log)
+            transcriber = await _admit_transcriber(gate, registry, model_id, log)
+
+            # ASR and (optionally) diarization run sequentially under the
+            # single-flight gate -- one request's GPU work at a time.
+            infer_start = time.monotonic()
+            try:
+                raw_segments = await run_in_threadpool(
+                    lambda: list(transcriber.transcribe(audio, language=language_hint))
+                )
+                turns = []
+                if do_diarize and diarizer is not None:
+                    turns = await run_in_threadpool(
+                        lambda: diarizer.diarize(
+                            audio, min_speakers=min_speakers,
+                            max_speakers=max_speakers, rid=rid,
+                        )
+                    )
+            finally:
+                gate.release()
+            infer_ms = int((time.monotonic() - infer_start) * 1000)
+
+            transcript = assemble(raw_segments, language=language_hint, duration=duration)
+            if turns:
+                transcript = apply_speakers(transcript, turns)
+            logger.info(
+                "done(asr): dur=%.1fs infer=%dms segments=%d speakers=%d output=%s",
+                duration, infer_ms, len(transcript.segments),
+                len({s.speaker for s in transcript.segments if s.speaker}), output,
+                extra=log,
+            )
+            if debug_enabled():
+                logger.debug("transcript text=%r", transcript.text, extra=log)
+            rendered = render_asr(transcript, output)
+            return Response(content=rendered.body, media_type=rendered.media_type)
 
     return app
 

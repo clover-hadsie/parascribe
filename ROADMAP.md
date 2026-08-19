@@ -48,10 +48,23 @@ routes to GPU:
 - **Process-isolated pyannote-GPU** — run pyannote in its own process/venv so its
   CUDA stack can't collide with onnxruntime-gpu, then talk over a local socket.
 
-### Speaker-count control
-Expose `min_speakers` / `max_speakers` (only exact `num_speakers` today), and
-optionally post-filter the low-mass phantom speakers pyannote spawns on poor audio
+### Speaker-count control — partially shipped
+`min_speakers` / `max_speakers` are now exposed on both the OpenAI and `/asr`
+surfaces (passed through to pyannote alongside `num_speakers`). Remaining idea:
+post-filter the low-mass phantom speakers pyannote spawns on poor audio
 (observed 8 labels for a 5-person meeting; `num_speakers=5` collapses them).
+
+### Speaker embeddings / voice profiles
+The WhisperX-service variant of the `/asr` API can return per-speaker
+embeddings (`return_speaker_embeddings=true`: a `speaker_embeddings` dict
+keyed by label), which front ends use for cross-recording speaker recognition
+("this voice is the same person as in last week's meeting"). pyannote computes
+embeddings internally but exposing them is real design work: dimensionality
+and format compatibility with what clients expect (256-dim, WhisperX-style),
+plus the privacy implications of emitting persistable voiceprints from a
+server whose logging is deliberately content-free. Until designed, `/asr`
+returns 400 on `return_speaker_embeddings=true` rather than fabricating the
+field.
 
 ### Diarized streaming
 Diarization currently forces a non-streamed response (clustering needs the whole

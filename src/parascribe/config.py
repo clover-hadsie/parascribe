@@ -73,6 +73,12 @@ class Settings(BaseSettings):
     # the server returns 503.
     max_queue: int = 16
 
+    # whisper-asr-webservice compatibility surface (POST /asr).
+    # UNAUTHENTICATED: enable only behind an internal network boundary.
+    enable_asr_compat: bool = False
+    # Diarization default when an /asr request carries no diarize param.
+    asr_compat_diarize_default: bool = True
+
     # Diarization (opt-in per request, gated here at the server level)
     enable_diarization: bool = False
     diarization_model: str = "pyannote/speaker-diarization-3.1"

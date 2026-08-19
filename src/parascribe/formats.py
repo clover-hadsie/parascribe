@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from parascribe.stitch import Segment, Transcript, Word
 
 ALLOWED_FORMATS = ("json", "text", "verbose_json", "srt", "vtt")
+# whisper-asr-webservice `output` values the /asr compat route serves (tsv is not).
+ASR_OUTPUTS = ("json", "txt", "srt", "vtt")
 # Formats whose output can be streamed incrementally; srt/vtt/text fall back to a
 # single non-streamed response.
 STREAMABLE_FORMATS = ("json", "verbose_json")
@@ -54,6 +56,15 @@ def verbose_json_body(transcript: Transcript, *, include_words: bool) -> dict[st
     if include_words:
         body["words"] = [_word_dict(w) for w in transcript.words]
     return body
+
+
+def asr_json_body(transcript: Transcript) -> dict[str, object]:
+    """The whisper-asr-webservice ``output=json`` shape: {text, segments, language}."""
+    return {
+        "text": transcript.text,
+        "segments": [_segment_dict(s) for s in transcript.segments],
+        "language": transcript.language,
+    }
 
 
 def _format_timestamp(seconds: float, *, millis_sep: str) -> str:
@@ -145,3 +156,10 @@ def render(
     if response_format == "vtt":
         return Rendered(to_vtt(transcript), "text/vtt; charset=utf-8")
     raise ValueError(f"unsupported response_format: {response_format!r}")
+
+
+def render_asr(transcript: Transcript, output: str) -> Rendered:
+    """Render for the whisper-asr-webservice ``output`` param."""
+    if output == "json":
+        return Rendered(json.dumps(asr_json_body(transcript)), "application/json")
+    return render(transcript, {"txt": "text"}.get(output, output), include_words=False)

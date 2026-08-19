@@ -42,7 +42,16 @@ class FakeTranscriber:
 
 class FakeDiarizer:
     # CANNED segments sit at 0-2s and 4-6s; split the timeline between two speakers.
-    def diarize(self, audio, *, num_speakers=None, rid="-"):
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def diarize(self, audio, *, num_speakers=None, min_speakers=None,
+                max_speakers=None, rid="-"):
+        self.calls.append({
+            "num_speakers": num_speakers,
+            "min_speakers": min_speakers,
+            "max_speakers": max_speakers,
+        })
         return [SpeakerTurn(0.0, 3.0, "SPEAKER_00"), SpeakerTurn(3.0, 6.0, "SPEAKER_01")]
 
 
@@ -110,6 +119,16 @@ def post(client, wav, *, key="secret", **data):
             files={"file": ("clip.wav", fh, "audio/wav")},
             data={"model": "parascribe", **data},
             headers=headers,
+        )
+
+
+def post_asr(client, wav, **params):
+    """POST /asr like ASR-webservice clients do: query params, `audio_file`, no auth."""
+    with wav.open("rb") as fh:
+        return client.post(
+            "/asr",
+            params=params,
+            files={"audio_file": ("clip.wav", fh, "audio/wav")},
         )
 
 
@@ -426,6 +445,200 @@ class TestDiarization:
             assert not r.headers["content-type"].startswith("text/event-stream")
             assert r.json()["segments"][0]["speaker"] == "SPEAKER_00"
 
+    def test_min_max_speakers_passed_through(self, tmp_path, wav):
+        diarizer = FakeDiarizer()
+        with make_client(tmp_path, diarizer=diarizer) as client:
+            r = post(client, wav, diarization="true", min_speakers="2", max_speakers="4")
+            assert r.status_code == 200
+            assert diarizer.calls == [
+                {"num_speakers": None, "min_speakers": 2, "max_speakers": 4}
+            ]
+
+    def test_min_above_max_is_400(self, tmp_path, wav):
+        with make_client(tmp_path, diarizer=FakeDiarizer()) as client:
+            r = post(client, wav, diarization="true", min_speakers="4", max_speakers="2")
+            assert r.status_code == 400
+
+    def test_nonpositive_speaker_hint_is_400(self, tmp_path, wav):
+        with make_client(tmp_path, diarizer=FakeDiarizer()) as client:
+            assert post(client, wav, diarization="true", min_speakers="0").status_code == 400
+
+
+class TestAsrCompat:
+    """The whisper-asr-webservice compatibility surface (/asr)."""
+
+    def test_disabled_by_default_is_404(self, tmp_path, wav):
+        with make_client(tmp_path, diarizer=FakeDiarizer()) as client:
+            assert post_asr(client, wav, output="json").status_code == 404
+
+    def test_no_auth_required_even_with_api_key_configured(self, tmp_path, wav):
+        # make_client configures api_key="secret"; this surface's clients cannot
+        # send credentials.
+        with make_client(
+            tmp_path, diarizer=FakeDiarizer(), enable_asr_compat=True
+        ) as client:
+            r = post_asr(client, wav, output="json", diarize="true")
+            assert r.status_code == 200
+
+    def test_typical_client_request_returns_golden_json(self, tmp_path, wav):
+        # The request shape a real ASR-webservice client issues: everything as
+        # query params, both diarize names sent with the same value, and
+        # encode/task/output always present.
+        with make_client(
+            tmp_path, diarizer=FakeDiarizer(), enable_asr_compat=True
+        ) as client:
+            r = post_asr(
+                client, wav, encode="true", task="transcribe", output="json",
+                diarize="true", enable_diarization="true",
+            )
+            body = r.json()
+            assert set(body) == {"text", "segments", "language"}
+            segs = body["segments"]
+            assert segs[0]["speaker"] == "SPEAKER_00"
+            assert segs[1]["speaker"] == "SPEAKER_01"
+            assert all({"speaker", "text", "start", "end"} <= set(s) for s in segs)
+
+    def test_diarize_false_returns_null_speakers(self, tmp_path, wav):
+        with make_client(
+            tmp_path, diarizer=FakeDiarizer(), enable_asr_compat=True
+        ) as client:
+            r = post_asr(client, wav, output="json", diarize="false")
+            assert all(s["speaker"] is None for s in r.json()["segments"])
+
+    def test_diarize_defaults_on(self, tmp_path, wav):
+        diarizer = FakeDiarizer()
+        with make_client(
+            tmp_path, diarizer=diarizer, enable_asr_compat=True
+        ) as client:
+            assert post_asr(client, wav, output="json").status_code == 200
+            assert len(diarizer.calls) == 1
+
+    def test_diarize_default_configurable_off(self, tmp_path, wav):
+        diarizer = FakeDiarizer()
+        with make_client(
+            tmp_path, diarizer=diarizer, enable_asr_compat=True,
+            asr_compat_diarize_default=False,
+        ) as client:
+            assert post_asr(client, wav, output="json").status_code == 200
+            assert diarizer.calls == []
+
+    def test_whisperx_param_name_enables_diarization(self, tmp_path, wav):
+        diarizer = FakeDiarizer()
+        with make_client(
+            tmp_path, diarizer=diarizer, enable_asr_compat=True,
+            asr_compat_diarize_default=False,
+        ) as client:
+            post_asr(client, wav, output="json", enable_diarization="true")
+            assert len(diarizer.calls) == 1
+
+    def test_diarize_param_wins_over_enable_diarization(self, tmp_path, wav):
+        diarizer = FakeDiarizer()
+        with make_client(
+            tmp_path, diarizer=diarizer, enable_asr_compat=True
+        ) as client:
+            post_asr(client, wav, output="json", diarize="false", enable_diarization="true")
+            assert diarizer.calls == []
+
+    def test_diarize_without_diarizer_is_400_not_silent(self, tmp_path, wav):
+        with make_client(tmp_path, enable_asr_compat=True) as client:  # no diarizer
+            r = post_asr(client, wav, output="json", diarize="true")
+            assert r.status_code == 400
+            assert "diarization" in r.json()["error"]["message"].lower()
+
+    def test_min_max_speakers_passed_through(self, tmp_path, wav):
+        diarizer = FakeDiarizer()
+        with make_client(
+            tmp_path, diarizer=diarizer, enable_asr_compat=True
+        ) as client:
+            post_asr(client, wav, output="json", diarize="true",
+                     min_speakers="2", max_speakers="4")
+            assert diarizer.calls == [
+                {"num_speakers": None, "min_speakers": 2, "max_speakers": 4}
+            ]
+
+    def test_min_above_max_is_400(self, tmp_path, wav):
+        with make_client(
+            tmp_path, diarizer=FakeDiarizer(), enable_asr_compat=True
+        ) as client:
+            r = post_asr(client, wav, output="json", min_speakers="4", max_speakers="2")
+            assert r.status_code == 400
+
+    def test_speaker_embeddings_request_is_400(self, tmp_path, wav):
+        with make_client(
+            tmp_path, diarizer=FakeDiarizer(), enable_asr_compat=True
+        ) as client:
+            r = post_asr(client, wav, output="json", diarize="true",
+                         return_speaker_embeddings="true")
+            assert r.status_code == 400
+            assert "embedding" in r.json()["error"]["message"].lower()
+
+    def test_translate_task_is_400(self, tmp_path, wav):
+        with make_client(
+            tmp_path, diarizer=FakeDiarizer(), enable_asr_compat=True
+        ) as client:
+            assert post_asr(client, wav, task="translate").status_code == 400
+
+    def test_tsv_output_is_400(self, tmp_path, wav):
+        with make_client(
+            tmp_path, diarizer=FakeDiarizer(), enable_asr_compat=True
+        ) as client:
+            assert post_asr(client, wav, output="tsv").status_code == 400
+
+    def test_txt_srt_vtt_outputs(self, tmp_path, wav):
+        with make_client(
+            tmp_path, diarizer=FakeDiarizer(), enable_asr_compat=True
+        ) as client:
+            txt = post_asr(client, wav, output="txt", diarize="false")
+            assert txt.headers["content-type"].startswith("text/plain")
+            assert "first part" in txt.text
+            assert "-->" in post_asr(client, wav, output="srt", diarize="false").text
+            assert post_asr(client, wav, output="vtt", diarize="false").text.startswith("WEBVTT")
+
+    def test_ignored_params_accepted(self, tmp_path, wav):
+        # initial_prompt/hotwords/language are accepted and ignored; undeclared
+        # params (word_timestamps) are tolerated like the upstream webservice.
+        with make_client(
+            tmp_path, diarizer=FakeDiarizer(), enable_asr_compat=True
+        ) as client:
+            r = post_asr(
+                client, wav, output="json", diarize="false", language="en",
+                initial_prompt="names: Scott", hotwords="parascribe",
+                word_timestamps="true",
+            )
+            assert r.status_code == 200
+
+    def test_unknown_model_is_400_in_multi_mode(self, tmp_path, wav):
+        with make_multi_client(
+            tmp_path, models=["model-a", "model-b"], enable_asr_compat=True
+        ) as client:
+            assert post_asr(client, wav, output="json", diarize="false",
+                            model="large-v3").status_code == 400
+            assert post_asr(client, wav, output="json", diarize="false",
+                            model="model-b").status_code == 200
+
+    def test_missing_audio_file_is_400(self, tmp_path):
+        with make_client(
+            tmp_path, diarizer=FakeDiarizer(), enable_asr_compat=True
+        ) as client:
+            r = client.post("/asr", params={"output": "json"})
+            assert r.status_code == 400
+            assert r.json()["error"]["param"] == "audio_file"
+
+    def test_saturated_gate_returns_503(self, tmp_path, wav, monkeypatch):
+        with make_client(
+            tmp_path, diarizer=FakeDiarizer(), enable_asr_compat=True
+        ) as client:
+            gate = client.app.state.gate
+            monkeypatch.setattr(gate, "_admitted", gate._capacity)
+            assert post_asr(client, wav, output="json").status_code == 503
+
+    def test_upload_removed_after_success(self, tmp_path, wav):
+        with make_client(
+            tmp_path, diarizer=FakeDiarizer(), enable_asr_compat=True
+        ) as client:
+            assert post_asr(client, wav, output="json").status_code == 200
+            assert list((tmp_path / "work").iterdir()) == []
+
 
 @pytest.fixture
 def parascribe_log(caplog):
@@ -466,6 +679,19 @@ class TestForensicCleanliness:
         assert "done:" in blob  # capture sanity: operational line was logged
         assert "first part" not in blob.lower()  # transcript content
         assert "clip.wav" not in blob  # original filename
+
+    def test_asr_route_logs_no_content_or_filename_at_info(self, tmp_path, wav, parascribe_log):
+        with make_client(
+            tmp_path, diarizer=FakeDiarizer(), enable_asr_compat=True
+        ) as client:
+            parascribe_log.attach()
+            post_asr(client, wav, output="json", diarize="true",
+                     initial_prompt="secret prompt", hotwords="secretword")
+        blob = self._log_blob(parascribe_log)
+        assert "done(asr):" in blob  # capture sanity: operational line was logged
+        assert "first part" not in blob.lower()  # transcript content
+        assert "clip.wav" not in blob  # original filename
+        assert "secret" not in blob  # prompt/hotword content
 
     def test_url_never_logged_even_on_fetch_failure(self, tmp_path, parascribe_log, monkeypatch):
         from parascribe.fetch import FetchError

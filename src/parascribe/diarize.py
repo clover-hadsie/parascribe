@@ -118,16 +118,27 @@ class Diarizer:
         audio: npt.NDArray[np.float32],
         *,
         num_speakers: int | None = None,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
         rid: str = "-",
     ) -> list[SpeakerTurn]:
-        """Return speaker turns for a 16 kHz mono float32 array (absolute times)."""
+        """Return speaker turns for a 16 kHz mono float32 array (absolute times).
+
+        Speaker-count hints are passed to pyannote, which resolves precedence
+        itself (``num_speakers`` pins the count; ``min``/``max`` bound it).
+        """
         # .copy(): the decoded PCM is a read-only np.frombuffer view; torch needs writable.
         waveform = self._torch.from_numpy(audio.copy()).unsqueeze(0)  # (1, num_samples)
         duration = audio.shape[0] / SAMPLE_RATE
         step_pct = 10 if duration >= _PROGRESS_STEP_THRESHOLD_S else 20
         params: dict[str, object] = {"hook": _ProgressLogger(rid, step_pct)}
-        if num_speakers is not None:
-            params["num_speakers"] = num_speakers
+        for key, value in (
+            ("num_speakers", num_speakers),
+            ("min_speakers", min_speakers),
+            ("max_speakers", max_speakers),
+        ):
+            if value is not None:
+                params[key] = value
         result = self._pipeline(
             {"waveform": waveform, "sample_rate": SAMPLE_RATE}, **params
         )
