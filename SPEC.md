@@ -560,8 +560,14 @@ turns + words → expected labels, covering overlap, ties, gaps, and 0/1-speaker
 
 - `diarization` — bool, default false. When true, segments carry real `speaker`
   labels (`SPEAKER_00`, ...) instead of `null`.
-- `num_speakers` — optional int hint; omitted → automatic. (May also expose
-  `min_speakers`/`max_speakers`.)
+- Speaker count. By default the number of speakers is detected automatically.
+  If you already know how many people are talking, send `num_speakers` (for
+  example `num_speakers=2` for an interview). If you only know a rough range,
+  send `min_speakers` and/or `max_speakers` instead (for example between 2 and
+  5 people in a meeting). Sending both kinds together is allowed but
+  pointless: when `num_speakers` is present, pyannote uses that exact count
+  and the range has no effect. Validation: zero or negative values are
+  rejected with a 400, as is a `min_speakers` larger than `max_speakers`.
 - `speaker` on **words**: include when `verbose_json` + word granularity +
   diarization are all on (forward-compat with OpenAI `diarized_json`); otherwise
   segment-level only. Labels are opaque `SPEAKER_NN` — **no speaker naming/
@@ -617,3 +623,38 @@ preemph=0.97, 128 Slaney mel, `log(mel + 2^-24)`, no normalization.
 
 Speaker identification/naming (only opaque `SPEAKER_NN`), realtime/streaming
 diarization, and cross-file speaker consistency.
+
+---
+
+## 16. whisper-asr-webservice compatibility surface (`POST /asr`)
+
+An adapter over the existing decode → transcribe → stitch → diarize pipeline
+(no new inference code) implementing the core of the
+ahmetoner/whisper-asr-webservice API, including the WhisperX-service
+diarization extensions, for transcript front ends with an ASR-webservice
+connector. The wire contract was verified against a real client
+implementation, not the webservice docs; the user-facing summary is in the
+README and the contract itself is pinned by the golden tests
+(`tests/test_formats.py`, `tests/test_api.py`).
+
+- **Off by default** (`enable_asr_compat`), and **unauthenticated** when on:
+  the upstream API has no authentication and its clients send no credentials,
+  so the route cannot carry bearer auth. Internal-network exposure only;
+  startup logs a warning.
+- Params are query params; audio is a multipart `audio_file` field.
+  `output=json` returns `{text, segments, language}` with per-segment
+  `speaker`/`text`/`start`/`end` (the fields clients read); `txt`/`srt`/`vtt`
+  reuse the OpenAI renderers; `tsv` → 400. `task=translate` → 400.
+- `diarize` or `enable_diarization` (the WhisperX-service name) enables
+  diarization; with neither present the default is
+  `asr_compat_diarize_default` (true). `diarize=true` without server-side
+  diarization → 400 (fail loudly, §15.5). `min_speakers`/`max_speakers` pass
+  through to pyannote. Segment-level speakers only (no word-level fields on
+  this surface).
+- `return_speaker_embeddings=true` → 400 (embeddings are a ROADMAP item).
+  `language`/`initial_prompt`/`hotwords`/`encode` accepted and ignored.
+  `model` resolves against the registry like the OpenAI route (§5.2).
+- Same single-flight gate and `max_queue` admission (503), same tmpfs
+  `work_dir` lifecycle, same content-free logging, same timestamp clamping.
+  No `usage` object (the upstream shape has none; no gateway on this path).
+  No streaming (the upstream API is synchronous; diarization is whole-file).

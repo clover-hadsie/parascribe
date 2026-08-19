@@ -93,6 +93,8 @@ All settings are environment variables prefixed `PARASCRIBE_` (see `.env.example
 | `DIARIZATION_MODEL` | `pyannote/speaker-diarization-3.1` | pyannote pipeline (gated model). |
 | `DIARIZATION_DEVICE` | (follow ASR) | `cuda`/`cpu`. Use `cpu` to avoid VRAM contention with ASR on small cards. |
 | `HF_TOKEN` / `HF_TOKEN_FILE` | (none) | HuggingFace token for the one-time gated diarization-model download. |
+| `ENABLE_ASR_COMPAT` | `false` | Serve `POST /asr` (whisper-asr-webservice compatibility). **UNAUTHENTICATED** — see [ASR compatibility](#whisper-asr-webservice-compatibility-post-asr). |
+| `ASR_COMPAT_DIARIZE_DEFAULT` | `true` | Diarization default when an `/asr` request carries no `diarize` param. |
 | `AUDIO_INPUT_USAGE_UNIT` | `file_duration` | Unit for the audio-input component: `token` \| `word` \| `segment` \| `char` \| `file_duration`. See [Token costs](#token-costs). |
 | `AUDIO_INPUT_USAGE_MULTIPLIER` | `10.0` | Audio-input rate. Default `duration * 10` mirrors OpenAI (~10 audio tokens/sec). `0` disables it. |
 | `AUDIO_INPUT_USAGE_FIELD` | `input_tokens` | Which usage field audio input feeds: `input_tokens` (OpenAI parity) or `output_tokens` (one combined count). |
@@ -273,11 +275,57 @@ curl -s http://127.0.0.1:8000/v1/audio/transcriptions \
 - `diarization=true` labels each segment's `speaker` (`SPEAKER_00`, ...); opaque
   labels only — no speaker naming/identification.
 - `num_speakers=N` optionally fixes the speaker count; omitted = automatic.
+  Alternatively, `min_speakers` / `max_speakers` give a range. If
+  `num_speakers` is set, the range is ignored.
 - Speaker labels surface in `verbose_json`. Diarization is **incompatible with
   `stream=true`** (it needs the whole file) — streaming is ignored and the
   request returns non-streamed.
 - If `diarization=true` but the server wasn't started with it enabled, the
   request returns **400** (never a silent no-speaker result).
+
+### whisper-asr-webservice compatibility (`POST /asr`)
+
+Off by default (`PARASCRIBE_ENABLE_ASR_COMPAT=true` to serve it). Implements
+the core of the [ahmetoner/whisper-asr-webservice](https://github.com/ahmetoner/whisper-asr-webservice)
+API, including the WhisperX-service diarization extensions, so transcript
+front ends with an ASR-webservice connector get transcription **with speaker
+diarization** from parascribe in place of a whisper-asr-webservice or WhisperX
+container. Point a client's ASR endpoint base URL at the server root (e.g.
+`http://parascribe:8000`); parameters ride as query params, the audio as a
+multipart `audio_file` field. `GET /health` and `GET /v1/models`, which such
+clients commonly probe, are also served.
+
+**Security posture: this route is UNAUTHENTICATED.** The upstream webservice
+API has no authentication and its clients send no credentials, so `/asr`
+cannot honor `API_KEY` without breaking every consumer. Enable it only behind
+an internal network boundary (localhost, a Docker network, a VPN); never
+expose it publicly. The rest of the server (the OpenAI surface, `/v1/models`)
+keeps its normal bearer auth.
+
+Implemented:
+
+- `output=json` (top-level `text`/`language`, segments with
+  `speaker`/`text`/`start`/`end`), plus `txt`/`srt`/`vtt` via the same
+  renderers as the OpenAI surface. `tsv` returns 400.
+- `diarize` / `enable_diarization` (the WhisperX-service name) — either
+  enables diarization; the default with neither present is
+  `ASR_COMPAT_DIARIZE_DEFAULT` (`true`). `diarize=true` on a server without
+  diarization enabled returns **400**, never a silent speakerless result.
+- `min_speakers` / `max_speakers` — passed through to pyannote.
+- `model` — resolved like the OpenAI surface (unknown returns 400;
+  `/v1/models` advertises the valid ids).
+- `language`, `initial_prompt`, `hotwords`, `encode` — accepted and ignored
+  (Parakeet auto-detects language and takes no prompt; decode always runs
+  through ffmpeg).
+
+Deliberately not implemented: `task=translate` (400), speaker embeddings /
+voice profiles (`return_speaker_embeddings=true` returns 400 — see
+`ROADMAP.md`), `/detect-language`, streaming.
+
+Requests share the same single-flight inference gate, `MAX_QUEUE` admission
+(503 when saturated), tmpfs temp handling, and content-free logging as the
+OpenAI surface. Responses carry no `usage` object (the upstream shape has
+none), so `/asr` traffic is invisible to gateway spend tracking by design.
 
 ### `GET /health`
 

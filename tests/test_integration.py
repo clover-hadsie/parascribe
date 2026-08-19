@@ -125,3 +125,59 @@ class TestRealModel:
         flat = [v for w in result.words for v in (w.start, w.end)]
         assert flat == sorted(flat)
         assert result.words[-1].end <= dur + 0.1
+
+
+class TestAsrCompatEndpoint:
+    """The /asr surface against the real model (diarization needs pyannote + HF)."""
+
+    def _client(self, tmp_path, transcriber, **overrides):
+        from fastapi.testclient import TestClient
+
+        from parascribe.config import Settings
+        from parascribe.main import create_app
+
+        settings = Settings(
+            execution_provider=os.getenv("PARASCRIBE_EXECUTION_PROVIDER", "cpu"),
+            work_dir=tmp_path / "work",
+            enable_asr_compat=True,
+            **overrides,
+        )
+        diarizer = None
+        if overrides.get("enable_diarization"):
+            from parascribe.diarize import DiarizationUnavailableError, Diarizer
+
+            try:
+                diarizer = Diarizer(settings)
+            except DiarizationUnavailableError as exc:
+                pytest.skip(f"diarization unavailable: {exc}")
+        return TestClient(
+            create_app(settings=settings, transcriber=transcriber, diarizer=diarizer)
+        )
+
+    def _post(self, client, clip, **params):
+        with clip.open("rb") as fh:
+            return client.post(
+                "/asr", params={"output": "json", **params},
+                files={"audio_file": ("clip.wav", fh, "audio/wav")},
+            )
+
+    def test_no_diarize_segments_monotonic_and_clamped(self, tmp_path, transcriber, long_clip):
+        clip, dur = long_clip
+        with self._client(tmp_path, transcriber) as client:
+            body = self._post(client, clip, diarize="false").json()
+        assert body["segments"]
+        times = [v for s in body["segments"] for v in (s["start"], s["end"])]
+        assert times == sorted(times)
+        assert times[-1] <= dur + 0.1
+        assert all(s["speaker"] is None for s in body["segments"])
+
+    def test_diarize_labels_speakers(self, tmp_path, transcriber, long_clip):
+        clip, _ = long_clip
+        with self._client(
+            tmp_path, transcriber, enable_diarization=True,
+            diarization_device="cpu",
+        ) as client:
+            body = self._post(client, clip, diarize="true").json()
+        speakers = {s["speaker"] for s in body["segments"]}
+        assert speakers and None not in speakers
+        assert all(label.startswith("SPEAKER_") for label in speakers)

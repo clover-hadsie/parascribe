@@ -7,8 +7,10 @@ import json
 import pytest
 
 from parascribe.formats import (
+    asr_json_body,
     done_event,
     render,
+    render_asr,
     to_srt,
     to_vtt,
     verbose_json_body,
@@ -110,6 +112,50 @@ class TestUsageInRender:
             transcript, response_format="verbose_json", include_words=False, usage=_USAGE,
         )
         assert event["usage"] == _USAGE
+
+
+class TestAsrOutput:
+    """Contract with ASR-webservice clients: they read top-level text/segments/
+    language and per-segment speaker/text/start/end; extra keys are ignored."""
+
+    def test_json_golden_shape(self, transcript):
+        body = asr_json_body(transcript)
+        # Top-level keys clients read; nothing else is promised on this surface.
+        assert set(body) == {"text", "segments", "language"}
+        assert body["text"] == "Hello world."
+        assert body["language"] == "en"
+        seg = body["segments"][0]
+        # Per-segment keys clients read (extras like id/avg_logprob are ignored).
+        assert {"speaker", "text", "start", "end"} <= set(seg)
+        assert (seg["start"], seg["end"], seg["text"]) == (0.0, 1.5, "Hello world.")
+
+    def test_json_speaker_null_without_diarization(self, transcript):
+        assert asr_json_body(transcript)["segments"][0]["speaker"] is None
+
+    def test_json_carries_speaker_labels(self, transcript):
+        diarized = Transcript(
+            text=transcript.text, language=transcript.language,
+            duration=transcript.duration, words=transcript.words,
+            token_count=transcript.token_count,
+            segments=[
+                Segment(id=0, start=0.0, end=1.5, text="Hello world.",
+                        speaker="SPEAKER_00", avg_logprob=-0.1)
+            ],
+        )
+        assert asr_json_body(diarized)["segments"][0]["speaker"] == "SPEAKER_00"
+
+    def test_render_asr_json(self, transcript):
+        r = render_asr(transcript, "json")
+        assert r.media_type == "application/json"
+        assert json.loads(r.body)["text"] == "Hello world."
+
+    def test_render_asr_txt_matches_text_format(self, transcript):
+        r = render_asr(transcript, "txt")
+        assert r.body == render(transcript, "text", include_words=False).body
+
+    def test_render_asr_srt_and_vtt_reuse_renderers(self, transcript):
+        assert render_asr(transcript, "srt").body == to_srt(transcript)
+        assert render_asr(transcript, "vtt").body == to_vtt(transcript)
 
 
 def test_unsupported_format_raises():
