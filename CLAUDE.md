@@ -15,7 +15,9 @@ than guessing. After behavior-changing work, note if `SPEC.md` needs updating.
    param, when present, only selects word vs segment vs both.
 2. **GPU or fail loudly.** If configured for GPU and `CUDAExecutionProvider` is not
    active at startup, log ERROR and exit non-zero. Never silently fall back to CPU.
-   Target hardware is Pascal / sm_61.
+   Target hardware is Pascal / sm_61. Exception: with `gpu_idle_unload_ttl` set the
+   server boots cold (no preload) and this check runs at each model load instead.
+   `scripts/check_gpu.py` covers deploy-time verification.
 3. **Forensic cleanliness.** No transcript text, segment text, original filenames,
    or audio bytes in logs at INFO. Uploads live under a tmpfs `work_dir` and are
    deleted in a `finally`, including on error/timeout. `debug_logging` (default
@@ -42,6 +44,8 @@ than guessing. After behavior-changing work, note if `SPEC.md` needs updating.
 - Lint/type: **ruff** + **mypy**. Tests: **pytest**, in `tests/` mirroring `src/`.
 - Type hints and docstrings on public functions. No dead code, no trailing
   whitespace, files end with a newline.
+- Minimal comments and docs: one short line per fact, no rationale chains or
+  restating what the code shows. Deeper detail lives in the code itself.
 - `stitch.py` (offset correction + merge) is the crux — heavily unit-tested in
   isolation before any API wiring.
 

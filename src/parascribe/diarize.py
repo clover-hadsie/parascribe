@@ -108,11 +108,13 @@ class Diarizer:
                 f"could not load {settings.diarization_model}: accept its license on "
                 "HuggingFace and set hf_token/hf_token_file (or pre-cache the model)"
             )
-        pipeline.to(torch.device(device))
+        attach_now = device == "cuda" and settings.gpu_idle_unload_ttl is None
+        if device == "cpu" or attach_now:
+            pipeline.to(torch.device(device))
         self._pipeline = pipeline
         self._torch = torch
         self._device = device
-        self.on_gpu = device == "cuda"
+        self.on_gpu = attach_now
         logger.info("diarization model loaded")
 
     def release(self) -> None:
