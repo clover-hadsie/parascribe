@@ -83,6 +83,14 @@ class InferenceGate:
         self._sem = asyncio.Semaphore(1)
         self._capacity = max(1, capacity)
         self._admitted = 0
+        # Idle-tracking signals consumed by _idle_unloader.
+        self.last_release = time.monotonic()
+        self.activity = asyncio.Event()
+
+    @property
+    def busy(self) -> bool:
+        """Whether any request is currently admitted (in flight or queued)."""
+        return self._admitted > 0
 
     async def acquire(self) -> None:
         """Admit this request (raising QueueFullError if saturated) then serialize.
@@ -105,6 +113,8 @@ class InferenceGate:
         """Free the in-flight slot. Sync so future callbacks can call it."""
         self._sem.release()
         self._admitted -= 1
+        self.last_release = time.monotonic()
+        self.activity.set()
 
     async def __aenter__(self) -> InferenceGate:
         await self.acquire()
@@ -343,6 +353,39 @@ async def _ingest_upload(
     return audio, duration
 
 
+async def _idle_unloader(
+    gate: InferenceGate,
+    registry: ModelRegistry,
+    diarizer: Diarizer | None,
+    ttl: float,
+) -> None:
+    """Release GPU memory once the server has been idle for ``ttl`` seconds."""
+    while True:
+        await gate.activity.wait()
+        gate.activity.clear()
+        while not gate.busy:
+            remaining = ttl - (time.monotonic() - gate.last_release)
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+                continue
+            if not registry.loaded_ids() and (diarizer is None or not diarizer.on_gpu):
+                break  # nothing resident (also ends the wakeup from our own release)
+            async with gate:
+                if gate._admitted > 1:
+                    break  # a real request is already waiting; stay warm
+
+                def _release() -> None:
+                    # Diarizer first: once /health reports no loaded models, the
+                    # whole release is known to be complete.
+                    if diarizer is not None:
+                        diarizer.release()
+                    registry.release_all()
+
+                await run_in_threadpool(_release)
+                logger.info("idle for %.0fs: released GPU memory", ttl)
+            break
+
+
 async def _admit_transcriber(
     gate: InferenceGate, registry: ModelRegistry, model_id: str, log: dict[str, str]
 ) -> Transcriber:
@@ -396,6 +439,14 @@ def create_app(
             Diarizer(settings) if settings.enable_diarization else None
         )
         app.state.gate = InferenceGate(settings.max_queue)
+        unloader: asyncio.Task[None] | None = None
+        if settings.gpu_idle_unload_ttl is not None:
+            unloader = asyncio.create_task(
+                _idle_unloader(
+                    app.state.gate, app.state.registry, app.state.diarizer,
+                    settings.gpu_idle_unload_ttl,
+                )
+            )
         if settings.enable_asr_compat:
             logger.warning(
                 "ASR compat surface (/asr) enabled: the route is UNAUTHENTICATED; "
@@ -408,6 +459,8 @@ def create_app(
             app.state.diarizer is not None, settings.max_queue,
         )
         yield
+        if unloader is not None:
+            unloader.cancel()
 
     app = FastAPI(title="parascribe", version=__version__, lifespan=lifespan)
 

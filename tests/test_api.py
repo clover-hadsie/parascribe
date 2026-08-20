@@ -7,6 +7,7 @@ import json
 import logging
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -44,15 +45,22 @@ class FakeDiarizer:
     # CANNED segments sit at 0-2s and 4-6s; split the timeline between two speakers.
     def __init__(self):
         self.calls: list[dict] = []
+        self.on_gpu = True
+        self.releases = 0
 
     def diarize(self, audio, *, num_speakers=None, min_speakers=None,
                 max_speakers=None, rid="-"):
+        self.on_gpu = True  # a real Diarizer re-attaches to the GPU on demand
         self.calls.append({
             "num_speakers": num_speakers,
             "min_speakers": min_speakers,
             "max_speakers": max_speakers,
         })
         return [SpeakerTurn(0.0, 3.0, "SPEAKER_00"), SpeakerTurn(3.0, 6.0, "SPEAKER_01")]
+
+    def release(self):
+        self.on_gpu = False
+        self.releases += 1
 
 
 @pytest.fixture
@@ -638,6 +646,49 @@ class TestAsrCompat:
         ) as client:
             assert post_asr(client, wav, output="json").status_code == 200
             assert list((tmp_path / "work").iterdir()) == []
+
+
+class TestIdleUnload:
+    """gpu_idle_unload_ttl: models unload after the idle TTL; 0 = right away."""
+
+    @staticmethod
+    def _wait_for_unload(client, timeout=3.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if client.get("/health").json()["loaded"] == []:
+                return True
+            time.sleep(0.02)
+        return False
+
+    def test_ttl_zero_unloads_after_request(self, tmp_path, wav):
+        diarizer = FakeDiarizer()
+        with make_client(tmp_path, diarizer=diarizer, gpu_idle_unload_ttl=0.0) as client:
+            assert post(client, wav, diarization="true").status_code == 200
+            assert self._wait_for_unload(client)
+            assert diarizer.releases >= 1
+            assert diarizer.on_gpu is False
+
+    def test_next_request_reloads_after_unload(self, tmp_path, wav):
+        with make_client(tmp_path, gpu_idle_unload_ttl=0.0) as client:
+            assert post(client, wav).status_code == 200
+            assert self._wait_for_unload(client)
+            assert post(client, wav).status_code == 200
+
+    def test_unset_keeps_models_resident(self, tmp_path, wav):
+        with make_client(tmp_path) as client:
+            assert post(client, wav).status_code == 200
+            time.sleep(0.1)
+            assert client.get("/health").json()["loaded"] != []
+
+    def test_positive_ttl_stays_warm_within_window(self, tmp_path, wav):
+        with make_client(tmp_path, gpu_idle_unload_ttl=60.0) as client:
+            assert post(client, wav).status_code == 200
+            time.sleep(0.1)
+            assert client.get("/health").json()["loaded"] != []
+
+    def test_negative_ttl_rejected_by_config(self):
+        with pytest.raises(ValueError):
+            Settings(execution_provider="cpu", gpu_idle_unload_ttl=-1)
 
 
 @pytest.fixture
