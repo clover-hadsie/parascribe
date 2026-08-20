@@ -205,7 +205,8 @@ GPU fail-loud check is preserved regardless of mode.
 - [ ] `MAX_RESIDENT_MODELS=2`: requesting a second model keeps both resident (no
       eviction); requesting a third evicts the least-recently-used.
 - [ ] `MODEL_ID` is preloaded and GPU-verified at startup in both modes; a broken
-      GPU stack fails startup non-zero (invariant #2 preserved).
+      GPU stack fails startup non-zero (invariant #2 preserved). Exception:
+      `gpu_idle_unload_ttl` skips the preload and defers the check to first load.
 - [ ] Model load and eviction occur only while the single-flight gate is held (no
       inference runs concurrently with a load/evict).
 - [ ] With `MODEL_TTL_S` set, a model idle longer than the TTL is evicted on the

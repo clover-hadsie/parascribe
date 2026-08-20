@@ -432,7 +432,9 @@ def create_app(
             app.state.registry = ModelRegistry.seeded(settings, transcriber)
         else:
             app.state.registry = ModelRegistry(settings)
-            app.state.registry.preload()
+            # Idle unload boots cold.
+            if settings.gpu_idle_unload_ttl is None:
+                app.state.registry.preload()
         # Load the diarizer once when enabled; a load failure (missing deps/gated
         # model) fails startup loudly rather than silently disabling the feature.
         app.state.diarizer = diarizer or (
@@ -447,6 +449,7 @@ def create_app(
                     settings.gpu_idle_unload_ttl,
                 )
             )
+            app.state.gate.activity.set()
         if settings.enable_asr_compat:
             logger.warning(
                 "ASR compat surface (/asr) enabled: the route is UNAUTHENTICATED; "

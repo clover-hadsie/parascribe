@@ -660,6 +660,25 @@ class TestIdleUnload:
             time.sleep(0.02)
         return False
 
+    def test_unloads_after_startup_preload_without_any_request(self, tmp_path):
+        # Anything resident at boot (here the injected transcriber) is released
+        # by the TTL without waiting for a first request.
+        diarizer = FakeDiarizer()
+        with make_client(tmp_path, diarizer=diarizer, gpu_idle_unload_ttl=0.0) as client:
+            assert self._wait_for_unload(client)
+            assert diarizer.on_gpu is False
+
+    def test_boots_cold_and_loads_on_first_request(self, tmp_path, wav):
+        settings = Settings(
+            execution_provider="cpu", work_dir=tmp_path / "work", api_key="secret",
+            gpu_idle_unload_ttl=60.0,
+        )
+        registry = ModelRegistry(settings, factory=lambda _mid: FakeTranscriber())
+        with TestClient(create_app(settings=settings, registry=registry)) as client:
+            assert client.get("/health").json()["loaded"] == []
+            assert post(client, wav).status_code == 200
+            assert client.get("/health").json()["loaded"] != []
+
     def test_ttl_zero_unloads_after_request(self, tmp_path, wav):
         diarizer = FakeDiarizer()
         with make_client(tmp_path, diarizer=diarizer, gpu_idle_unload_ttl=0.0) as client:
