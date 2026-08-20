@@ -111,7 +111,18 @@ class Diarizer:
         pipeline.to(torch.device(device))
         self._pipeline = pipeline
         self._torch = torch
+        self._device = device
+        self.on_gpu = device == "cuda"
         logger.info("diarization model loaded")
+
+    def release(self) -> None:
+        """Move the pipeline off the GPU and return cached VRAM to the driver."""
+        if not self.on_gpu:
+            return
+        self._pipeline.to(self._torch.device("cpu"))
+        self.on_gpu = False
+        self._torch.cuda.empty_cache()
+        logger.info("diarization model released from GPU")
 
     def diarize(
         self,
@@ -127,6 +138,9 @@ class Diarizer:
         Speaker-count hints are passed to pyannote, which resolves precedence
         itself (``num_speakers`` pins the count; ``min``/``max`` bound it).
         """
+        if self._device == "cuda" and not self.on_gpu:
+            self._pipeline.to(self._torch.device("cuda"))
+            self.on_gpu = True
         # .copy(): the decoded PCM is a read-only np.frombuffer view; torch needs writable.
         waveform = self._torch.from_numpy(audio.copy()).unsqueeze(0)  # (1, num_samples)
         duration = audio.shape[0] / SAMPLE_RATE
@@ -139,9 +153,14 @@ class Diarizer:
         ):
             if value is not None:
                 params[key] = value
-        result = self._pipeline(
-            {"waveform": waveform, "sample_rate": SAMPLE_RATE}, **params
-        )
+        try:
+            result = self._pipeline(
+                {"waveform": waveform, "sample_rate": SAMPLE_RATE}, **params
+            )
+        finally:
+            # Return the run's cached allocations to the driver.
+            if self.on_gpu:
+                self._torch.cuda.empty_cache()
         # The pipeline result wraps the Annotation in `.speaker_diarization`;
         # fall back to the result itself if it is already an Annotation.
         annotation = getattr(result, "speaker_diarization", result)

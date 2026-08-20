@@ -119,6 +119,12 @@ class ModelRegistry:
             lru = min(self._last_used, key=lambda m: self._last_used[m])
             self._evict(lru)
 
+    def release_all(self) -> None:
+        """Evict every resident model and the shared VAD, freeing their sessions."""
+        for model_id in list(self._loaded):
+            self._evict(model_id)
+        self._shared_vad = None
+
     def _evict(self, model_id: str) -> None:
         # Dropping all references frees the onnxruntime sessions (and GPU memory).
         # Safe because eviction only runs under the single-flight gate, so the model

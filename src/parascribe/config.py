@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 ExecutionProvider = Literal["cuda", "cpu", "coreml"]
@@ -72,6 +72,8 @@ class Settings(BaseSettings):
     # Max requests admitted at once (1 in-flight + the rest queued). Beyond this
     # the server returns 503.
     max_queue: int = 16
+    # Release GPU memory once the server has been idle for this TTL in seconds.
+    gpu_idle_unload_ttl: float | None = Field(default=None, ge=0)
 
     # whisper-asr-webservice compatibility surface (POST /asr).
     # UNAUTHENTICATED: enable only behind an internal network boundary.

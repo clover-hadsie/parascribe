@@ -112,6 +112,9 @@ non-goal and not exposed.
   loaded lazily, with up to `max_resident_models` resident (LRU eviction) and
   an optional idle TTL; the default model is always preloaded at startup so
   the GPU check below still fires. See `specs/multi-model-registry/spec.md`.
+- **Shared-GPU idle unload (`gpu_idle_unload_ttl`, optional):** when set, a
+  background task releases GPU memory after the server has been idle that many
+  seconds. `0` unloads immediately at the end of the task.
 - GPU pinning via the CUDA execution provider with a configurable `device_id`:
   ```python
   providers = [("CUDAExecutionProvider", {"device_id": settings.gpu_device_id})]
@@ -465,6 +468,7 @@ parascribe/
 `host`, `port`, `api_key` / `api_key_file`, `work_dir` (tmpfs default
 `/run/parascribe`), `max_chunk_s`, `chunk_overlap_s` (default 0), `vad_threshold`,
 `max_upload_mb`, `decode_timeout_s` (default 300), `max_queue`, `enable_video`,
+`gpu_idle_unload_ttl` (§5.2),
 `enable_url_fetch` / `url_fetch_allowlist` / `url_fetch_timeout_s`,
 `models` / `max_resident_models` / `model_ttl_s` (multi-model, see
 `specs/multi-model-registry/spec.md`), the `*_usage_*` billing knobs (§7),

@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from parascribe.config import Settings
 
     AudioInput = npt.NDArray[np.float32] | str | Path
-    ProviderSpec = list[str | tuple[str, dict[str, int]]]
+    ProviderSpec = list[str | tuple[str, dict[str, int | str]]]
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,18 @@ class GpuUnavailableError(RuntimeError):
 def build_providers(settings: Settings) -> ProviderSpec:
     """ONNX Runtime providers list for the configured execution provider."""
     if settings.execution_provider == "cuda":
-        return [("CUDAExecutionProvider", {"device_id": settings.gpu_device_id})]
+        # kSameAsRequested: grow the arena by exactly what an allocation needs
+        # instead of the default power-of-two over-reservation, keeping resident
+        # VRAM close to the true working set (matters on a shared GPU).
+        return [
+            (
+                "CUDAExecutionProvider",
+                {
+                    "device_id": settings.gpu_device_id,
+                    "arena_extend_strategy": "kSameAsRequested",
+                },
+            )
+        ]
     if settings.execution_provider == "coreml":
         return ["CoreMLExecutionProvider"]
     return ["CPUExecutionProvider"]

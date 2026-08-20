@@ -84,6 +84,7 @@ All settings are environment variables prefixed `PARASCRIBE_` (see `.env.example
 | `MAX_UPLOAD_MB` | `2048` | Max *upload* size; larger returns 413. Note: the upload is decoded fully into RAM as a 16 kHz float32 array (~115 MB/hour), so peak memory tracks decoded duration, not upload bytes — a small compressed file can expand to GBs. |
 | `DECODE_TIMEOUT_S` | `300` | Kill ffmpeg/ffprobe past this (hung/pathological input → 400). Bounds only the decode subprocess; transcription/diarization are never timed. |
 | `MAX_QUEUE` | `16` | Max admitted requests (1 in-flight + queued); beyond this returns 503. |
+| `GPU_IDLE_UNLOAD_TTL` | (none) | Release GPU memory after TTL seconds. `0` immediate unload. |
 | `ENABLE_VIDEO` | `false` | Accept video input (extract audio track). |
 | `ENABLE_URL_FETCH` | `false` | Fetch the input server-side when the upload's content is an http(s) URL (SSRF surface; see [URL input](#post-v1audiotranscriptions-multipartform-data)). |
 | `URL_FETCH_ALLOWLIST` | (empty) | Exact hosts allowed for URL fetches (e.g. `["media.example.com"]`). Empty = any public host (private/internal addresses always refused). |

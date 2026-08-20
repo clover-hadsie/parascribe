@@ -137,3 +137,27 @@ class TestSeeded:
         assert reg.get("a") is t
         assert reg.provider_active is True
         assert reg.device == "cpu"
+
+
+class TestReleaseAll:
+    def test_evicts_everything(self):
+        reg, loaded = registry(models=["a", "b"], max_resident_models=2)
+        reg.get("a")
+        reg.get("b")
+        reg.release_all()
+        assert reg.loaded_ids() == []
+        assert loaded == ["a", "b"]
+
+    def test_next_get_reloads_lazily(self):
+        reg, loaded = registry()
+        reg.get("a")
+        reg.release_all()
+        reg.get("a")
+        assert loaded == ["a", "a"]
+        assert reg.loaded_ids() == ["a"]
+
+    def test_noop_when_nothing_loaded(self):
+        reg, loaded = registry()
+        reg.release_all()
+        assert reg.loaded_ids() == []
+        assert loaded == []
