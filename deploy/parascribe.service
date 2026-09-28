@@ -19,6 +19,11 @@ WorkingDirectory=/opt/inference/parascribe
 RuntimeDirectory=parascribe
 RuntimeDirectoryMode=0700
 
+# ProtectHome=true hides the service user's real home, so point HOME at a
+# directory systemd creates and owns. Library caches (torch/pyannote) land here.
+StateDirectory=inference/parascribe
+Environment=HOME=/var/lib/inference/parascribe
+
 Environment=PARASCRIBE_EXECUTION_PROVIDER=cuda
 Environment=PARASCRIBE_GPU_DEVICE_ID=0
 Environment=PARASCRIBE_WORK_DIR=/run/parascribe
