@@ -22,8 +22,8 @@ with word- and segment-level timestamps, running on your own GPU.
 
 - Python 3.11 or newer
 - `ffmpeg` and `ffprobe` on `PATH`
-- For GPU: an NVIDIA card + CUDA runtime compatible with the pinned
-  `onnxruntime-gpu` (see [Pascal / ONNX Runtime](#pascal--onnx-runtime-pin)).
+- For GPU: an NVIDIA card with driver 550 or newer. On a GTX 1080 Ti, see
+  [Installing on Pascal](#installing-on-pascal-gtx-1080-ti).
 
 ## Install
 
@@ -35,11 +35,15 @@ python3 -m venv .venv   # Python 3.11+
 
 # Deployment (NVIDIA GPU):
 .venv/bin/pip install -r requirements-gpu.txt
+.venv/bin/pip install .
 
 # Development / CPU-only (e.g. Apple Silicon):
 .venv/bin/pip install -r requirements-dev.txt   # includes CPU onnxruntime + test tooling
 .venv/bin/pip install -e .
 ```
+
+Both paths need the second command: the requirements files bring in
+dependencies only, and `parascribe` itself will not import without it.
 
 Confirm GPU engagement on the deployment host in one command:
 
@@ -346,6 +350,40 @@ route accepts. Single-model mode lists the one configured model.
 
 See `deploy/parascribe.service` for a hardened systemd unit (dedicated user,
 tmpfs `RuntimeDirectory`, GPU device allow-list, writable HF cache).
+
+### Installing on Pascal (GTX 1080 Ti)
+
+Pascal is supported. Install from `requirements-gpu.txt` without upgrading
+anything in it and it works.
+
+1. Check your driver is 550 or newer:
+
+   ```bash
+   nvidia-smi --query-gpu=driver_version --format=csv
+   ```
+
+2. Install. The CUDA and cuDNN libraries come in as pip wheels, so you do not
+   need system CUDA installed:
+
+   ```bash
+   .venv/bin/pip install -r requirements-gpu.txt
+   .venv/bin/pip install .
+   ```
+
+3. Verify the GPU is actually engaged:
+
+   ```bash
+   PARASCRIBE_EXECUTION_PROVIDER=cuda .venv/bin/python scripts/check_gpu.py
+   ```
+
+4. Run diarization on CPU. Set `PARASCRIBE_DIARIZATION_DEVICE=cpu` if you use
+   `ENABLE_DIARIZATION`; GPU diarization does not work on this card.
+
+Do not `pip install -U` `onnxruntime-gpu` or the `nvidia-*` packages. The
+versions are pinned because newer ones either drop Pascal support or need a
+newer driver than the card's typical host. If you see
+`CUDNN_STATUS_EXECUTION_FAILED_CUDART` at startup, something was upgraded past
+the pins; reinstall from `requirements-gpu.txt`.
 
 ## Known issues
 
