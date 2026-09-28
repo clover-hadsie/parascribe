@@ -74,13 +74,32 @@ def build_providers(settings: Settings) -> ProviderSpec:
     return ["CPUExecutionProvider"]
 
 
+def preload_cuda_libs(settings: Settings) -> None:
+    """Load CUDA/cuDNN from the nvidia-*-cu12 pip wheels so they do not need to be
+    on LD_LIBRARY_PATH. Must run before the first session of the process is created.
+    """
+    if settings.execution_provider == "cuda" and hasattr(ort, "preload_dlls"):
+        ort.preload_dlls()
+
+
 def build_vad(settings: Settings) -> object:
     """Load the silero VAD with the configured providers.
 
     The VAD is model-independent, so the registry loads one and shares it across
     every Transcriber rather than reloading it per model.
     """
-    return onnx_asr.load_vad("silero", providers=build_providers(settings))
+    preload_cuda_libs(settings)
+    vad = onnx_asr.load_vad("silero", providers=build_providers(settings))
+    if settings.execution_provider == "cuda":
+        active = active_providers(vad)
+        # The model's own CUDA check is fatal; the VAD is small enough that CPU is
+        # survivable, but it must not be silent.
+        if active and "CUDAExecutionProvider" not in active:
+            logger.warning(
+                "VAD is running on %s, not CUDA; speech detection falls back to CPU",
+                sorted(active),
+            )
+    return vad
 
 
 def _iter_sessions(
@@ -121,10 +140,7 @@ class Transcriber:
         self.settings = settings
         self.model_id = model_id or settings.model_id
         providers = build_providers(settings)
-        if settings.execution_provider == "cuda" and hasattr(ort, "preload_dlls"):
-            # Load CUDA/cuDNN from the nvidia-*-cu12 pip wheels (requirements-gpu.txt)
-            # so they don't need to be on LD_LIBRARY_PATH.
-            ort.preload_dlls()
+        preload_cuda_libs(settings)
         logger.info("loading model %s on %s", self.model_id, settings.execution_provider)
         self._model = onnx_asr.load_model(self.model_id, providers=providers)
         self._vad = vad if vad is not None else build_vad(settings)
